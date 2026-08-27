@@ -1,13 +1,18 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ProductiveClient, type ProductiveClientOptions } from './productive/client.js';
 import { registerProductiveTools } from './tools/productive.js';
-import { describePolicy, loadPolicy } from './productive/policy.js';
+import { describePolicy, loadPolicy, perUserAuthEnabled } from './productive/policy.js';
+import type { CredentialStore } from './productive/store.js';
 
 export interface CreateServerOptions {
   client?: ProductiveClient;
   clientOptions?: ProductiveClientOptions;
   /** Caller address, forwarded by an authenticating gateway (X-MCP-User). */
   onBehalfOf?: string;
+  /** Per-user token store — required when PRODUCTIVE_PER_USER_AUTH=true. */
+  store?: CredentialStore;
+  /** Public base URL, used to build enrollment links. */
+  publicBaseUrl?: string;
 }
 
 const INSTRUCTIONS = `Productive.io: projects, tasks, time, resourcing, financials, CRM and reports for
@@ -42,17 +47,30 @@ refuses those itself rather than reporting a write that did not happen. If a
 write is refused for an unknown attribute, the name is wrong — call
 productive_describe_resource, do not retry.
 
-Every change Productive records is credited to the token's owner, not to the
-person asking. productive_check_connection names them.`;
+Every change Productive records is credited to whoever owns the token being
+used. productive_check_connection names them.
+
+If a tool answers NOT_CONNECTED, this server runs per-user auth: the caller has
+to link their own Productive token first. Call productive_connect, give them the
+link it returns, and let them paste the token into that page — never into this
+conversation, where it would stay in the transcript. productive_status says
+whether they are linked.`;
 
 export function createServer(options: CreateServerOptions = {}): McpServer {
   const server = new McpServer(
-    { name: 'mcp-server-productive', version: '0.1.0' },
+    { name: 'mcp-server-productive', version: '0.2.0' },
     { instructions: INSTRUCTIONS },
   );
 
+  // In per-user mode this client carries no usable credential of its own — it
+  // is a template the tools clone per call with the caller's stored token, so
+  // PRODUCTIVE_API_TOKEN stays unset on such a deployment.
   const client = options.client ?? new ProductiveClient(options.clientOptions);
-  registerProductiveTools(server, client, { onBehalfOf: options.onBehalfOf });
+  registerProductiveTools(server, client, {
+    onBehalfOf: options.onBehalfOf,
+    store: options.store,
+    publicBaseUrl: options.publicBaseUrl,
+  });
 
   return server;
 }
@@ -63,5 +81,6 @@ export function describeDeployment(): Record<string, unknown> {
     organizationId: process.env.PRODUCTIVE_ORGANIZATION_ID ?? '(unset — every request will fail)',
     permissions: describePolicy(loadPolicy()),
     forwardedIdentity: process.env.PRODUCTIVE_TRUST_FORWARDED_USER === 'true',
+    perUserAuth: perUserAuthEnabled(),
   };
 }

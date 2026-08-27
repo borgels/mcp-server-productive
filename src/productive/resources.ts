@@ -17,6 +17,7 @@ import {
   checkPolicy,
   describePolicy,
   loadPolicy,
+  perUserAuthEnabled,
   requiresTwoStep,
   type ProductivePolicy,
 } from './policy.js';
@@ -179,30 +180,45 @@ export async function describeCustomFields(
   };
 }
 
+/**
+ * Who the token is, which organization it is pinned to, and what may be written.
+ *
+ * The owner comes from `GET /users`, which is Productive's de-facto "me": it
+ * returns exactly one record, the caller. There is no `/users/me` — that path
+ * 404s. An earlier version read the first row of `/organization_memberships`
+ * instead, which is wrong for a subtle reason worth recording: that collection
+ * is not scoped to the pinned organization at all. It lists the CALLER's
+ * memberships across every organization they belong to, so its row count says
+ * nothing about how many people are in this one.
+ */
 export async function checkConnection(
   client: ProductiveClient,
   context: ExecutionContext = {},
 ): Promise<Record<string, unknown>> {
-  // /organization_memberships is the cheapest authenticated read that proves
-  // both headers are right: a bad token gives 401, a foreign organization 403.
-  const response = await client.request({
-    path: '/organization_memberships',
-    include: ['person'],
-    page: { size: 1 },
-  });
-  const first = flattenCollection(response).records[0];
-  const person = (first?.relationships as Record<string, FlatRecord> | undefined)?.person;
+  const owner = await tokenOwner(client);
+
+  // The same token commonly reaches several organizations, gated only by the
+  // header — so listing them is the honest way to show what the pin is holding
+  // back, rather than implying the token could only ever see one.
+  let reachable: unknown = 'could not be listed';
+  try {
+    const orgs = flattenCollection(
+      await client.request({ path: '/organizations', page: { size: MAX_PAGE_SIZE } }),
+    );
+    reachable = orgs.records.map(org => ({
+      organizationId: org.id,
+      name: org.name,
+      pinned: org.id === client.organization,
+    }));
+  } catch {
+    // Not fatal: the connection is already proven by the owner lookup.
+  }
 
   return {
     ok: true,
     organizationId: client.organization,
-    membershipCount: flattenCollection(response).total,
-    tokenBelongsTo: person
-      ? {
-          personId: person.id,
-          name: [person.first_name, person.last_name].filter(Boolean).join(' ') || undefined,
-        }
-      : undefined,
+    tokenBelongsTo: owner,
+    reachableOrganizations: reachable,
     caller: context.identity
       ? {
           email: context.identity.email,
@@ -212,9 +228,25 @@ export async function checkConnection(
         }
       : 'not forwarded (PRODUCTIVE_TRUST_FORWARDED_USER is off, or no gateway header)',
     permissions: describePolicy(context.policy ?? loadPolicy()),
-    attribution:
-      'Productive records every change against the token owner above, whatever the caller. ' +
-      'Person-shaped fields default to the resolved caller where one is known.',
+    attribution: perUserAuthEnabled()
+      ? 'Per-user auth is on: each caller acts with their own Productive token, so Productive credits changes to them.'
+      : 'Productive records every change against the token owner above, whatever the caller. ' +
+        'Person-shaped fields default to the resolved caller where one is known.',
+  };
+}
+
+/** The person a token belongs to, via Productive's single-row /users. */
+export async function tokenOwner(
+  client: ProductiveClient,
+): Promise<Record<string, unknown> | undefined> {
+  const response = await client.request({ path: '/users' });
+  const user = flattenCollection(response).records[0];
+  if (!user) return undefined;
+  return {
+    userId: user.id,
+    email: user.email,
+    name: [user.first_name, user.last_name].filter(Boolean).join(' ') || undefined,
+    defaultOrganizationId: user.default_organization_id,
   };
 }
 

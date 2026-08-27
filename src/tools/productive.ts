@@ -2,7 +2,19 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ProductiveClient, FilterValue } from '../productive/client.js';
 import { formatUnknownError } from '../errors.js';
-import { loadPolicy, type ProductivePolicy } from '../productive/policy.js';
+import {
+  loadPolicy,
+  perUserAuthEnabled,
+  requireUser,
+  type ProductivePolicy,
+} from '../productive/policy.js';
+import { CredentialStore } from '../productive/store.js';
+import {
+  connectInstructions,
+  disconnect,
+  statusFor,
+  verifyAndStore,
+} from '../productive/enroll.js';
 import { searchCapabilities } from '../productive/capabilities.js';
 import { describeResource, resourceKeys, SPEC_FINGERPRINT } from '../productive/registry.js';
 import type { PreparedOperation } from '../productive/operations.js';
@@ -24,6 +36,10 @@ import {
 export interface RegisterOptions {
   /** Caller address forwarded by an authenticating gateway. */
   onBehalfOf?: string;
+  /** Per-user token store — required when PRODUCTIVE_PER_USER_AUTH=true. */
+  store?: CredentialStore;
+  /** Public base URL, used to build enrollment links. */
+  publicBaseUrl?: string;
 }
 
 /**
@@ -89,6 +105,39 @@ export function registerProductiveTools(
   options: RegisterOptions = {},
 ): void {
   const policy: ProductivePolicy = loadPolicy();
+  const perUser = perUserAuthEnabled();
+  const store = options.store;
+
+  if (perUser && !store) {
+    // Failing here rather than per call: a per-user deployment with no store is
+    // misconfigured, and discovering that on the first tool call looks like a
+    // bug in the caller instead of the deployment.
+    throw new Error(
+      'PRODUCTIVE_PER_USER_AUTH is on but no credential store was provided. Set PRODUCTIVE_STORE_PATH and PRODUCTIVE_ENCRYPTION_KEY.',
+    );
+  }
+
+  /**
+   * The client for this call.
+   *
+   * In per-user mode the base client carries no usable credential of its own —
+   * it is a template that is cloned with the caller's stored token. There is
+   * deliberately NO fallback to a shared token: falling back would hand an
+   * un-enrolled caller somebody else's rights, which is the exact failure this
+   * mode exists to remove.
+   */
+  const api = (): ProductiveClient => {
+    if (!perUser) return client;
+    const user = requireUser(options.onBehalfOf);
+    const credentials = store?.get(user);
+    if (!credentials) {
+      throw new Error(
+        `NOT_CONNECTED: ${user} has not linked a Productive token to this server. ` +
+          'Call productive_connect to get a one-time enrollment link.',
+      );
+    }
+    return client.withToken(credentials.apiToken);
+  };
 
   /**
    * The caller is resolved once per request, lazily. The HTTP transport builds a
@@ -96,7 +145,15 @@ export function registerProductiveTools(
    */
   let identityPromise: Promise<CallerIdentity | undefined> | undefined;
   const context = async (): Promise<ExecutionContext> => {
-    identityPromise ??= resolveIdentity(client, options.onBehalfOf);
+    identityPromise ??= (async () => {
+      try {
+        return await resolveIdentity(api(), options.onBehalfOf);
+      } catch {
+        // Not connected yet in per-user mode. The data tools report that
+        // themselves; identity is simply unknown until then.
+        return undefined;
+      }
+    })();
     return { policy, identity: await identityPromise };
   };
 
@@ -159,7 +216,7 @@ export function registerProductiveTools(
       inputSchema: {},
       annotations: readOnly,
     },
-    async () => wrap(async () => checkConnection(client, await context())),
+    async () => wrap(async () => checkConnection(api(), await context())),
   );
 
   server.registerTool(
@@ -182,7 +239,7 @@ export function registerProductiveTools(
       },
       annotations: readOnly,
     },
-    async ({ appliesTo }) => wrap(() => describeCustomFields(client, { appliesTo })),
+    async ({ appliesTo }) => wrap(() => describeCustomFields(api(), { appliesTo })),
   );
 
   // -------------------------------------------------------------------------
@@ -225,7 +282,7 @@ export function registerProductiveTools(
     async input =>
       wrap(async () =>
         listRecords(
-          client,
+          api(),
           { ...input, filters: input.filters as Record<string, FilterValue> | undefined },
           await context(),
         ),
@@ -247,7 +304,7 @@ export function registerProductiveTools(
       },
       annotations: readOnly,
     },
-    async input => wrap(async () => getRecord(client, input, await context())),
+    async input => wrap(async () => getRecord(api(), input, await context())),
   );
 
   // -------------------------------------------------------------------------
@@ -273,7 +330,7 @@ export function registerProductiveTools(
       },
       annotations: mutating,
     },
-    async input => wrap(async () => createRecord(client, input, await context())),
+    async input => wrap(async () => createRecord(api(), input, await context())),
   );
 
   server.registerTool(
@@ -292,7 +349,7 @@ export function registerProductiveTools(
       },
       annotations: mutating,
     },
-    async input => wrap(async () => updateRecord(client, input, await context())),
+    async input => wrap(async () => updateRecord(api(), input, await context())),
   );
 
   server.registerTool(
@@ -306,7 +363,7 @@ export function registerProductiveTools(
       inputSchema: { resource: z.string(), id: z.string() },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    async input => wrap(async () => deleteRecord(client, input, await context())),
+    async input => wrap(async () => deleteRecord(api(), input, await context())),
   );
 
   server.registerTool(
@@ -330,7 +387,7 @@ export function registerProductiveTools(
     async input =>
       wrap(async () =>
         runAction(
-          client,
+          api(),
           { ...input, filters: input.filters as Record<string, FilterValue> | undefined },
           await context(),
         ),
@@ -359,8 +416,70 @@ export function registerProductiveTools(
       },
       annotations: mutating,
     },
-    async input => wrap(async () => trackTime(client, input, await context())),
+    async input => wrap(async () => trackTime(api(), input, await context())),
   );
+
+  // -------------------------------------------------------------------------
+  // Per-user auth — registered only when it is switched on, so a shared-token
+  // deployment does not advertise three tools that would do nothing.
+  // -------------------------------------------------------------------------
+
+  if (perUser && store) {
+    server.registerTool(
+      'productive_connect',
+      {
+        title: 'Connect your Productive account',
+        description:
+          'Get a one-time link for linking your OWN Productive API token to this server, so ' +
+          'Productive applies your permissions and records your name on what you do. The token is ' +
+          'pasted into a browser form, never into this conversation — a Productive token is ' +
+          'equivalent to your whole account and would otherwise stay in the transcript forever.',
+        inputSchema: {
+          force: z
+            .boolean()
+            .optional()
+            .describe('Replace an already-stored token instead of reporting it.'),
+        },
+        annotations: { readOnlyHint: false },
+      },
+      async ({ force }) =>
+        wrap(() =>
+          Promise.resolve(
+            connectInstructions(store, requireUser(options.onBehalfOf), options.publicBaseUrl, {
+              force,
+            }),
+          ),
+        ),
+    );
+
+    server.registerTool(
+      'productive_status',
+      {
+        title: 'Connection status',
+        description:
+          'Whether this caller has linked a Productive token, and which Productive account it ' +
+          'turned out to belong to.',
+        inputSchema: {},
+        annotations: readOnly,
+      },
+      async () =>
+        wrap(() => Promise.resolve(statusFor(store, requireUser(options.onBehalfOf)))),
+    );
+
+    server.registerTool(
+      'productive_disconnect',
+      {
+        title: 'Disconnect your Productive account',
+        description:
+          'Delete the stored token for this caller. The token stays valid in Productive — revoke ' +
+          'it there under Settings → API integrations as well if that is the intent.',
+        inputSchema: {},
+        annotations: { readOnlyHint: false, destructiveHint: true },
+      },
+      async () =>
+        wrap(() => Promise.resolve(disconnect(store, requireUser(options.onBehalfOf)))),
+    );
+  }
 
   server.registerTool(
     'productive_commit_operation',
@@ -375,7 +494,7 @@ export function registerProductiveTools(
     },
     async ({ operation }) =>
       wrap(async () =>
-        commitOperation(client, operation as PreparedOperation, await context()),
+        commitOperation(api(), operation as PreparedOperation, await context()),
       ),
   );
 }
@@ -396,3 +515,4 @@ async function wrap(call: () => Promise<unknown>) {
 }
 
 export { SPEC_FINGERPRINT };
+export { verifyAndStore };

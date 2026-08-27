@@ -19,6 +19,9 @@ grouping), `productive_get`
 (150 named verbs: archive, restore, approve, close, copy, finalize, send…),
 `productive_track_time`, `productive_commit_operation`
 
+**Per-user auth (opt-in)** — `productive_connect`, `productive_status`,
+`productive_disconnect` — see [Authentication](#authentication)
+
 Start with `productive_search_capabilities`. Productive's resource names are its own — a budget is
 a `deal`, a board column is a `workflow_status`, a timesheet approval lives on `time_entries` —
 and guessing costs calls.
@@ -81,6 +84,11 @@ reads like a broken path.
 `item_id` and can be restored through that resource's `restore` action. Verified for tasks only —
 do not assume it holds for every type.
 
+**`GET /users` is the only caller-scoped endpoint.** It returns exactly one record — you — and is
+how this server identifies a token's owner. There is no `/users/me`; that path 404s. Beware
+`/organization_memberships`: it is *not* scoped to the pinned organization, but lists the caller's
+memberships across every organization they belong to, so its row count is not a headcount.
+
 **No rate-limit headers.** Only `x-request-id`, which errors from this server quote. Back off on
 429 rather than probing for the limit.
 
@@ -123,27 +131,87 @@ Six operations are flagged `outward` because they reach somebody outside the org
 moment they run: `invoices.send`, `invoices.send_einvoice`, `people.invite`, `people.resend`,
 `organizations.resend_code`, and creating an `invitation`.
 
-## Attribution
+## Authentication
 
-A Productive API token belongs to a person, and Productive credits every change to that person.
-With one organization-wide token, the activity log will say the service account did everything.
+Two modes. `PRODUCTIVE_ORGANIZATION_ID` is required in both, and is never a tool argument.
 
-That cannot be fixed from here without per-user tokens, but it can be narrowed. With
-`PRODUCTIVE_TRUST_FORWARDED_USER=true`, the `X-MCP-User` header is resolved to a Productive person
-and anything person-shaped — a time entry, a booking — defaults to **them** rather than to the
-token's owner. If the address matches nobody, or more than one person, the server refuses to guess
-and asks for an explicit `person_id`.
+### Per-user tokens (recommended)
 
-Enable it **only** behind a gateway that sets the header from a validated token *and strips any
-client-supplied copy*. Otherwise a caller can name anyone and log time as them.
+Each person links their **own** Productive token, so Productive applies their permissions and
+records their name on what they do.
 
-`productive_check_connection` reports the token's owner, so the attribution is never a surprise.
+This matters more on Productive than on most systems. Productive attributes work to people: a time
+entry belongs to a `person_id`, and every change is stamped with the token's owner in the activity
+log — which is the record a client invoice gets defended with. On one shared token, that log says
+the service account did everything.
+
+```env
+PRODUCTIVE_PER_USER_AUTH=true
+PRODUCTIVE_TRUST_FORWARDED_USER=true
+PRODUCTIVE_ENCRYPTION_KEY=<min 16 chars>
+PRODUCTIVE_STORE_PATH=/data/store.json
+PRODUCTIVE_PUBLIC_BASE_URL=https://productive.example.com
+# PRODUCTIVE_API_TOKEN deliberately unset
+```
+
+The flow:
+
+1. The caller runs `productive_connect` and gets a **single-use link, valid 10 minutes**, bound to
+   their identity.
+2. They open it and paste a token they created in Productive under **Settings → API integrations**.
+   The token goes from their browser straight to the server, so it never enters the conversation
+   transcript — a Productive token is bearer-equivalent to their whole account, and, as measured
+   below, commonly reaches more than one organization.
+3. Before storing it, the server calls `GET /users` **with that token and this organization's id**.
+   One call proves three things: the token is valid, it can reach *this* organization, and who it
+   belongs to. The page then confirms which account was linked.
+4. Tokens are encrypted at rest with AES-256-GCM, one row per verified identity.
+
+Sharp edges:
+
+- **Identity comes only from the gateway.** `X-MCP-User` is read only when
+  `PRODUCTIVE_TRUST_FORWARDED_USER=true`, never from anything the MCP client controls. Enable it
+  only behind a gateway that sets the header from a validated token *and strips a client-supplied
+  copy* — otherwise a caller can name any identity and act as them.
+- **No fallback.** An un-enrolled caller gets `NOT_CONNECTED`, never the shared token, even if
+  `PRODUCTIVE_API_TOKEN` happens to be set. A fallback would hand them borrowed rights, which is
+  the failure this mode exists to remove.
+- **`/productive/enroll` must be reachable by the user's browser**, bypassing the MCP gateway — a
+  browser cannot carry the gateway's bearer token. Route `/productive/*` on
+  `PRODUCTIVE_PUBLIC_BASE_URL` straight to the container. Its security is the single-use,
+  identity-bound state token.
+- **Persist `PRODUCTIVE_STORE_PATH`** on a volume, and keep `PRODUCTIVE_ENCRYPTION_KEY` stable —
+  change it and every stored token becomes undecryptable.
+- If a token's own Productive email differs from the caller's directory address, that is reported
+  loudly on the page and in `productive_status`, and connected anyway. Set
+  `PRODUCTIVE_REQUIRE_EMAIL_MATCH=true` to refuse instead. It is off by default because whoever
+  pastes another person's token already holds it, so refusing buys little security, while a
+  Productive account under a different address is entirely plausible.
+- Per-user auth separates **permissions and attribution, not organizations**. The organization pin
+  still applies to everyone.
+
+### Shared token
+
+Set `PRODUCTIVE_API_TOKEN` to one token. Simple, and right for stdio or a single operator — but
+every caller then acts as **that token's owner**, with their permissions, and Productive's activity
+log credits every change to them.
+
+`PRODUCTIVE_TRUST_FORWARDED_USER` still helps here: person-shaped writes (a time entry, a booking)
+default to the resolved caller rather than the token's owner, and the server refuses to guess when
+the address matches nobody or more than one person. `productive_check_connection` names the token's
+owner either way, so the attribution is never a surprise.
 
 ## Multi-organization
 
-One instance serves exactly one organization. `X-Organization-Id` comes from the environment and
-is never a tool argument, so no code path — including the generic tools — can reach another
-tenant. Run a second instance for a second organization; the image is the same.
+One instance serves exactly one organization. `X-Organization-Id` comes from the environment and is
+never a tool argument, so no code path — including the generic tools — can reach another tenant.
+Run a second instance for a second organization; the image is the same.
+
+This is not theoretical. A single token routinely reaches several organizations: on the account this
+was developed against, `GET /organizations` returned three, and switching only the header moved
+between them (the other two answered `403 subscription_expired`, not "not found"). The header is the
+whole boundary, which is why it is pinned rather than passed in — and why an enrolled per-user token
+is verified against *this* organization before it is stored.
 
 ## Configuration
 

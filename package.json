@@ -1,6 +1,6 @@
 {
   "name": "mcp-server-productive",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Policy-aware MCP server for the Productive.io API v2 (JSON:API) — projects, tasks, time, resourcing, financials, CRM and reports.",
   "type": "module",
   "main": "./dist/stdio.js",
