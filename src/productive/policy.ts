@@ -155,6 +155,48 @@ export function describePolicy(policy: ProductivePolicy = loadPolicy()): Record<
   };
 }
 
+// ---------------------------------------------------------------------------
+// Per-user authentication
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether each caller acts with their own Productive token.
+ *
+ * This matters more here than on most connectors. Productive attributes work to
+ * people — a time entry belongs to a person, and every change is stamped with
+ * the token owner in the activity log. On a shared token the log says the
+ * service account did everything, which is not a cosmetic problem: it is the
+ * record a client invoice is defended with.
+ */
+export function perUserAuthEnabled(): boolean {
+  return process.env.PRODUCTIVE_PER_USER_AUTH === 'true';
+}
+
+/**
+ * Whether a mismatch between the gateway identity and the enrolled token's own
+ * Productive email should be refused rather than merely reported.
+ *
+ * Off by default. Somebody who pastes another person's token already holds that
+ * person's credential, so blocking buys little security, and a legitimate
+ * mismatch — a Productive account under a different address than the directory
+ * one — is entirely plausible. The mismatch is always surfaced loudly; whether
+ * it is fatal is the operator's call, not this server's guess about their email
+ * hygiene.
+ */
+export function requireEmailMatch(): boolean {
+  return process.env.PRODUCTIVE_REQUIRE_EMAIL_MATCH === 'true';
+}
+
+/** The caller identity, or a refusal explaining that there is none. */
+export function requireUser(user: string | undefined): string {
+  if (user) return user;
+  throw new Error(
+    'No caller identity. Per-user auth is on (PRODUCTIVE_PER_USER_AUTH), so every call needs a ' +
+      'verified caller, and none was forwarded. This server must sit behind a gateway that sets ' +
+      'X-MCP-User from a validated token, with PRODUCTIVE_TRUST_FORWARDED_USER=true.',
+  );
+}
+
 function splitList(value: string | undefined): string[] {
   return (value ?? '')
     .split(',')

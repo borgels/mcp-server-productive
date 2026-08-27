@@ -1,4 +1,5 @@
 import { searchResources, type ResourceMatch } from './registry.js';
+import { perUserAuthEnabled } from './policy.js';
 import type { Tier } from './registry-types.js';
 
 /**
@@ -131,6 +132,35 @@ export const TOOL_CAPABILITIES: Capability[] = [
   ),
 ];
 
+/**
+ * Only registered when PRODUCTIVE_PER_USER_AUTH is on, and filtered out of
+ * discovery otherwise: advertising a tool the server does not register is a
+ * dead end for the model.
+ */
+export const AUTH_CAPABILITIES: Capability[] = [
+  tool(
+    'productive_connect',
+    'Connect your Productive account',
+    'Get a one-time link for linking your own Productive API token, so Productive applies your permissions and records your name on what you do.',
+    'write',
+    ['connect', 'link', 'auth', 'token', 'sign in', 'enroll', 'not_connected'],
+  ),
+  tool(
+    'productive_status',
+    'Connection status',
+    'Whether this caller has linked a Productive token, and which account it belongs to.',
+    'read',
+    ['status', 'connected', 'auth', 'whoami'],
+  ),
+  tool(
+    'productive_disconnect',
+    'Disconnect your Productive account',
+    'Delete the stored token for this caller.',
+    'write',
+    ['disconnect', 'unlink', 'revoke', 'forget'],
+  ),
+];
+
 export const GUIDE_CAPABILITIES: Capability[] = [
   guide(
     'productive_guide_time_tracking',
@@ -186,7 +216,19 @@ export const GUIDE_CAPABILITIES: Capability[] = [
   ),
 ];
 
-export const ALL_CAPABILITIES: Capability[] = [...TOOL_CAPABILITIES, ...GUIDE_CAPABILITIES];
+const AUTH_IDS = new Set(AUTH_CAPABILITIES.map(capability => capability.id));
+
+export const ALL_CAPABILITIES: Capability[] = [
+  ...TOOL_CAPABILITIES,
+  ...AUTH_CAPABILITIES,
+  ...GUIDE_CAPABILITIES,
+];
+
+/** Capabilities this deployment actually offers. */
+function availableCapabilities(): Capability[] {
+  if (perUserAuthEnabled()) return ALL_CAPABILITIES;
+  return ALL_CAPABILITIES.filter(capability => !AUTH_IDS.has(capability.id));
+}
 
 export interface CapabilitySearchResult {
   capabilities: Capability[];
@@ -195,20 +237,26 @@ export interface CapabilitySearchResult {
 
 export function searchCapabilities(query: string, limit = 10): CapabilitySearchResult {
   const needle = query.trim().toLowerCase();
+  const pool = availableCapabilities();
   const capabilities = needle
-    ? ALL_CAPABILITIES.filter(
+    ? pool.filter(
         capability =>
           capability.id.includes(needle) ||
           capability.title.toLowerCase().includes(needle) ||
           capability.description.toLowerCase().includes(needle) ||
           capability.keywords.some(keyword => keyword.includes(needle) || needle.includes(keyword)),
       ).slice(0, limit)
-    : TOOL_CAPABILITIES.slice(0, limit);
+    : pool.filter(capability => capability.kind === 'tool').slice(0, limit);
 
   return { capabilities, resources: searchResources(needle, limit) };
 }
 
-/** Capability ids that name a real tool, for the tools-match-catalogue test. */
+/**
+ * Capability ids that name a real registered tool in this deployment. Guides
+ * document workflows and deliberately do not shadow a tool name.
+ */
 export function toolCapabilityIds(): string[] {
-  return TOOL_CAPABILITIES.map(capability => capability.id);
+  return availableCapabilities()
+    .filter(capability => capability.kind === 'tool')
+    .map(capability => capability.id);
 }

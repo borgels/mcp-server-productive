@@ -78,6 +78,7 @@ export class ProductiveClient {
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
 
+
   constructor(options: ProductiveClientOptions = {}) {
     this.apiToken = options.apiToken ?? process.env.PRODUCTIVE_API_TOKEN;
     this.organizationId = options.organizationId ?? process.env.PRODUCTIVE_ORGANIZATION_ID;
@@ -92,6 +93,24 @@ export class ProductiveClient {
   /** The organization this server is pinned to. */
   get organization(): string | undefined {
     return this.organizationId;
+  }
+
+  /**
+   * A clone of this client that authenticates with somebody else's token.
+   *
+   * The organization pin, base URL, timeout and fetch implementation are
+   * carried over unchanged — only the credential differs. That is what makes
+   * per-user auth safe here: a caller supplies who they are, never which tenant
+   * to act in, and the same token often reaches several organizations.
+   */
+  withToken(apiToken: string): ProductiveClient {
+    return new ProductiveClient({
+      apiToken,
+      organizationId: this.organizationId,
+      baseUrl: this.baseUrl,
+      fetchImpl: this.fetchImpl,
+      timeoutMs: this.timeoutMs,
+    });
   }
 
   async request<T = unknown>(options: ProductiveRequestOptions): Promise<ProductiveResponse<T>> {

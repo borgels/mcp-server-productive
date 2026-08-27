@@ -124,30 +124,74 @@ describe('reads', () => {
     );
   });
 
-  it('reports the token owner and the policy on a connection check', async () => {
-    const { client } = harness([
+  it('reports the token owner from /users, the only caller-scoped endpoint', async () => {
+    // /users returns exactly one record: the caller. There is no /users/me —
+    // that path 404s. An earlier version read the first row of
+    // /organization_memberships instead, which happened to look right and was
+    // wrong: that collection lists the CALLER's memberships across every
+    // organization they belong to, so it is neither org-scoped nor a headcount.
+    const { client, calls } = harness([
       {
         data: [
           {
-            id: '1',
-            type: 'organization_memberships',
-            attributes: {},
-            relationships: { person: { data: { id: '900001', type: 'people' } } },
+            id: '400001',
+            type: 'users',
+            attributes: {
+              email: 'ada@example.com',
+              first_name: 'Ada',
+              last_name: 'Lovelace',
+              default_organization_id: 12345,
+            },
           },
         ],
-        included: [
-          { id: '900001', type: 'people', attributes: { first_name: 'Ada', last_name: 'Lovelace' } },
+        meta: { total_count: 1 },
+      },
+      {
+        data: [
+          { id: '12345', type: 'organizations', attributes: { name: 'Pinned Org' } },
+          { id: '67890', type: 'organizations', attributes: { name: 'Another Org' } },
         ],
-        meta: { total_count: 3 },
+        meta: { total_count: 2 },
       },
     ]);
 
     const result = await checkConnection(client, openPolicy());
+    expect(calls[0]?.url).toContain('/users');
     expect(result.organizationId).toBe('12345');
-    expect(result.tokenBelongsTo).toMatchObject({ personId: '900001', name: 'Ada Lovelace' });
-    // Attribution is stated rather than left implicit: every change is credited
-    // to this person whoever asked.
+    expect(result.tokenBelongsTo).toMatchObject({
+      userId: '400001',
+      email: 'ada@example.com',
+      name: 'Ada Lovelace',
+    });
+    // The same token routinely reaches more than one organization, gated only
+    // by the header, so what the pin holds back is stated rather than implied.
+    expect(result.reachableOrganizations).toEqual([
+      { organizationId: '12345', name: 'Pinned Org', pinned: true },
+      { organizationId: '67890', name: 'Another Org', pinned: false },
+    ]);
     expect(String(result.attribution)).toMatch(/against the token owner/i);
+  });
+
+  it('still reports a working connection when the organization list fails', async () => {
+    let call = 0;
+    const fetchImpl = (async () => {
+      call += 1;
+      if (call === 1) {
+        return new Response(
+          JSON.stringify({ data: [{ id: '1', type: 'users', attributes: { email: 'a@b.c' } }] }),
+          { status: 200, headers: { 'content-type': 'application/vnd.api+json' } },
+        );
+      }
+      return new Response(JSON.stringify({ errors: [{ code: 'forbidden' }] }), {
+        status: 403,
+        headers: { 'content-type': 'application/vnd.api+json' },
+      });
+    }) as unknown as typeof fetch;
+    const client = new ProductiveClient({ apiToken: 't', organizationId: '12345', fetchImpl });
+
+    const result = await checkConnection(client, openPolicy());
+    expect(result.ok).toBe(true);
+    expect(result.reachableOrganizations).toBe('could not be listed');
   });
 });
 
