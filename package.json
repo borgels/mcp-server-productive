@@ -1,0 +1,71 @@
+{
+  "name": "mcp-server-productive",
+  "version": "0.1.0",
+  "description": "Policy-aware MCP server for the Productive.io API v2 (JSON:API) — projects, tasks, time, resourcing, financials, CRM and reports.",
+  "type": "module",
+  "main": "./dist/stdio.js",
+  "exports": {
+    ".": "./dist/stdio.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    ".env.example"
+  ],
+  "bin": {
+    "mcp-server-productive": "./dist/stdio.js"
+  },
+  "scripts": {
+    "build": "tsup src/transports/stdio.ts src/transports/http.ts --format esm --dts --clean --sourcemap",
+    "dev": "tsx src/transports/stdio.ts",
+    "dev:http": "tsx src/transports/http.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "registry:generate": "node scripts/generate-registry.mjs",
+    "prepare": "npm run build",
+    "prepack": "npm run typecheck && npm test && npm run build",
+    "smoke:live": "tsx test/live-smoke.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/borgels/mcp-server-productive.git"
+  },
+  "keywords": [
+    "mcp",
+    "productive",
+    "productive-io",
+    "project-management",
+    "time-tracking",
+    "resource-planning",
+    "professional-services"
+  ],
+  "author": "",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "bugs": {
+    "url": "https://github.com/borgels/mcp-server-productive/issues"
+  },
+  "homepage": "https://github.com/borgels/mcp-server-productive#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.7.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6",
+    "yaml": "^2.8.1"
+  },
+  "overrides": {
+    "ip-address": ">=10.3.1",
+    "hono": ">=4.12.34",
+    "fast-uri": ">=4.1.2",
+    "@hono/node-server": ">=1.19.15 <2"
+  }
+}
