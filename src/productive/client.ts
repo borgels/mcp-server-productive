@@ -186,7 +186,7 @@ export class ProductiveClient {
  * Arrays are comma-joined rather than repeated, and nested objects recurse into
  * deeper brackets — that covers both operators (`filter[due_date][gt]`) and the
  * advanced logical groups (`filter[$op]=and&filter[0][id][eq]=1`), which are the
- * same syntax one level down. Verified live against BOS's organization.
+ * same syntax one level down. Verified live against a real organization.
  */
 function appendFilter(params: URLSearchParams, prefix: string, value: FilterValue): void {
   if (Array.isArray(value)) {
