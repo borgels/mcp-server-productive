@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 export class HttpRequestError extends Error {
@@ -31,8 +32,36 @@ export function assertAuthorized(req: IncomingMessage, config = getHttpConfig())
     return;
   }
 
-  if (req.headers.authorization !== `Bearer ${config.httpToken}`) {
+  if (!tokenMatches(req.headers.authorization, `Bearer ${config.httpToken}`)) {
     throw new HttpRequestError(401, 'Unauthorized');
+  }
+}
+
+/** Constant-time comparison: both sides are hashed so lengths never leak. */
+export function tokenMatches(given: string | undefined, expected: string): boolean {
+  const a = createHash('sha256').update(given ?? '', 'utf8').digest();
+  const b = createHash('sha256').update(expected, 'utf8').digest();
+  return timingSafeEqual(a, b) && typeof given === 'string';
+}
+
+/** Env switches that make this server trust a forwarded caller identity header. */
+export const TRUST_FORWARDED_USER_VARS = ['PRODUCTIVE_TRUST_FORWARDED_USER'] as const;
+
+/**
+ * Refuse to serve HTTP when a forwarded identity header is trusted but nothing
+ * authenticates the request: any client could then name any user.
+ */
+export function assertSafeHttpStartup(
+  config: HttpConfig = getHttpConfig(),
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  const trusting = TRUST_FORWARDED_USER_VARS.filter(name => env[name] === 'true');
+  if (trusting.length && !config.httpToken) {
+    throw new Error(
+      `${trusting.join(', ')}=true requires MCP_HTTP_TOKEN to be set. Without it any client that ` +
+        'can reach this server could set the forwarded user header and act as anyone. Set ' +
+        'MCP_HTTP_TOKEN (shared with the authenticating gateway) or turn the trust setting off.',
+    );
   }
 }
 
