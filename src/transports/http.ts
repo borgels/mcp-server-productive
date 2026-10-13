@@ -4,6 +4,7 @@ import { perUserAuthEnabled } from '../productive/policy.js';
 import { CredentialStore } from '../productive/store.js';
 import { describeDeployment } from '../server.js';
 import { createHttpApp, getHttpConfig } from './http-app.js';
+import { assertSafeHttpStartup } from './http-helpers.js';
 
 /**
  * Entry point: read the environment, build the dependencies once, listen.
@@ -12,6 +13,8 @@ import { createHttpApp, getHttpConfig } from './http-app.js';
  * port; this file only decides what to inject.
  */
 const config = getHttpConfig();
+// Refuse to start rather than serve a trusted identity header to anyone.
+assertSafeHttpStartup(config);
 const perUser = perUserAuthEnabled();
 
 // Constructed at startup so a missing or weak encryption key stops the server

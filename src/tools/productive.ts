@@ -84,20 +84,31 @@ const attributesSchema = z
   )
   .optional();
 
-/** The staged-operation shape, as productive_commit_operation takes it back. */
-const preparedOperationSchema = z.object({
-  operation: z.string(),
-  resource: z.string(),
-  method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']),
-  path: z.string(),
-  tier: z.enum(['read', 'write', 'financial', 'admin']),
-  filters: z.record(z.string(), z.unknown()).optional(),
-  body: z.unknown().optional(),
-  effect: z.string(),
-  warnings: z.array(z.string()),
-  dryRun: z.literal(true),
-  operationHash: z.string(),
-});
+/**
+ * The staged-operation shape, as productive_commit_operation takes it back.
+ *
+ * Strict, so nothing beyond what the prepare step produced can ride along.
+ * Shape is all this checks: the signature, expiry, owner, method, path and
+ * policy are all verified again at commit.
+ */
+const preparedOperationSchema = z
+  .object({
+    operation: z.string().min(1).max(200),
+    resource: z.string().min(1).max(200),
+    method: z.enum(['POST', 'PUT', 'PATCH', 'DELETE']),
+    path: z.string().min(1).max(2000).startsWith('/'),
+    tier: z.enum(['read', 'write', 'financial', 'admin']),
+    filters: z.record(z.string(), z.unknown()).optional(),
+    body: z.unknown().optional(),
+    effect: z.string(),
+    warnings: z.array(z.string()),
+    actingAs: z.string().nullable(),
+    preparedAt: z.string(),
+    expiresAt: z.string(),
+    dryRun: z.literal(true),
+    operationHash: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  .strict();
 
 export function registerProductiveTools(
   server: McpServer,
@@ -154,7 +165,7 @@ export function registerProductiveTools(
         return undefined;
       }
     })();
-    return { policy, identity: await identityPromise };
+    return { policy, identity: await identityPromise, user: options.onBehalfOf };
   };
 
   const readOnly = { readOnlyHint: true } as const;

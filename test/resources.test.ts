@@ -15,7 +15,8 @@ import {
 import { loadPolicy } from '../src/productive/policy.js';
 import { resetIdentityCache } from '../src/productive/identity.js';
 import type { FlatCollection } from '../src/productive/jsonapi.js';
-import type { PreparedOperation } from '../src/productive/operations.js';
+import { createHash } from 'node:crypto';
+import { prepareOperation, type PreparedOperation } from '../src/productive/operations.js';
 
 const originalEnv = { ...process.env };
 
@@ -331,7 +332,7 @@ describe('committing a staged operation', () => {
     };
 
     await expect(commitOperation(client, tampered, openPolicy())).rejects.toThrow(
-      /does not match its hash/,
+      /does not match its signature/,
     );
     expect(calls).toHaveLength(0);
   });
@@ -354,10 +355,224 @@ describe('committing a staged operation', () => {
     // Claiming a lower tier does not help, because the hash covers it...
     const downgraded = { ...staged, tier: 'write' as const };
     await expect(commitOperation(client, downgraded, openPolicy())).rejects.toThrow(
-      /does not match its hash/,
+      /does not match its signature/,
     );
     expect(calls).toHaveLength(0);
   });
+});
+
+describe('staged operation integrity', () => {
+  function stableStringify(value: unknown): string {
+    if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+    if (value && typeof value === 'object') {
+      return `{${Object.entries(value as Record<string, unknown>)
+        .filter(([, nested]) => nested !== undefined)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([key, nested]) => `${JSON.stringify(key)}:${stableStringify(nested)}`)
+        .join(',')}}`;
+    }
+    return JSON.stringify(value) ?? 'null';
+  }
+
+  /** A validly signed operation — as if the signing key were known. */
+  function forge(overrides: Partial<Parameters<typeof prepareOperation>[0]>): PreparedOperation {
+    return prepareOperation({
+      operation: 'update',
+      resource: 'tasks',
+      method: 'PATCH',
+      path: '/tasks/5',
+      tier: 'write',
+      body: { data: { type: 'tasks', id: '5', attributes: { title: 'x' } } },
+      effect: 'Update task 5.',
+      ...overrides,
+    });
+  }
+
+  it('refuses an operation re-hashed with an unkeyed digest', async () => {
+    const { client, calls } = harness();
+    const { operationHash: _ignored, ...unsigned } = {
+      ...forge({}),
+      method: 'DELETE' as const,
+      operation: 'delete',
+    };
+    const rehashed = {
+      ...unsigned,
+      operationHash: createHash('sha256').update(stableStringify(unsigned)).digest('hex'),
+    } as PreparedOperation;
+    await expect(commitOperation(client, rehashed, openPolicy())).rejects.toThrow(
+      /does not match its signature/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses an operation signed with a different secret', async () => {
+    const { client, calls } = harness();
+    process.env.PRODUCTIVE_PREPARE_SECRET = 'secret-one-secret-one-secret-one';
+    const staged = forge({});
+    process.env.PRODUCTIVE_PREPARE_SECRET = 'secret-two-secret-two-secret-two';
+    await expect(commitOperation(client, staged, openPolicy())).rejects.toThrow(
+      /does not match its signature/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses an expired operation', async () => {
+    const { client, calls } = harness();
+    const staged = forge({ now: new Date(Date.now() - 16 * 60 * 1000) });
+    await expect(commitOperation(client, staged, openPolicy())).rejects.toThrow(/expired/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('binds an operation to the caller who prepared it', async () => {
+    const { client, calls } = harness([{ data: { id: '5', type: 'tasks', attributes: {} } }]);
+    const staged = forge({ actingAs: 'alice@example.com' });
+    await expect(
+      commitOperation(client, staged, { ...openPolicy(), user: 'mallory@example.com' }),
+    ).rejects.toThrow(/belongs to another caller/);
+    await expect(commitOperation(client, staged, openPolicy())).rejects.toThrow(
+      /belongs to another caller/,
+    );
+    expect(calls).toHaveLength(0);
+
+    const result = await commitOperation(client, staged, {
+      ...openPolicy(),
+      user: 'alice@example.com',
+    });
+    expect(result.status).toBe('done');
+  });
+
+  it('binds staged writes to the forwarded caller and expires them after 15 minutes', async () => {
+    const { client } = harness();
+    const result = (await deleteRecord(
+      client,
+      { resource: 'tasks', id: '5' },
+      { ...openPolicy(), user: 'alice@example.com' },
+    )) as Extract<WriteOutcome, { status: 'staged' }>;
+    expect(result.operation.actingAs).toBe('alice@example.com');
+    expect(Date.parse(result.operation.expiresAt) - Date.parse(result.operation.preparedAt)).toBe(
+      15 * 60 * 1000,
+    );
+  });
+
+  it('re-derives the method from the registry', async () => {
+    const { client, calls } = harness();
+    await expect(
+      commitOperation(client, forge({ method: 'DELETE' }), openPolicy()),
+    ).rejects.toThrow(/is PATCH, not DELETE/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses a path that is not the resource template', async () => {
+    const { client, calls } = harness();
+    openPolicy();
+    delete process.env.PRODUCTIVE_ENABLE_FINANCIALS;
+    // A write-tier resource label must not carry a request to a financial path.
+    for (const path of ['/invoices/5', '/tasks/5/extra', '/tasks', '/tasks/']) {
+      await expect(
+        commitOperation(client, forge({ path }), { policy: loadPolicy() }),
+      ).rejects.toThrow(/does not match the registry path|Invalid id/);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses a path whose id is not a single safe segment', async () => {
+    const { client, calls } = harness();
+    const paths = [
+      '/tasks/..',
+      '/tasks/.',
+      '/tasks/%2e%2e',
+      '/tasks/a%2Fb',
+      '/tasks/a%5Cb',
+      '/tasks/a%3Fb',
+      '/tasks/a%23b',
+    ];
+    for (const path of paths) {
+      await expect(commitOperation(client, forge({ path }), openPolicy())).rejects.toThrow(
+        /Invalid id|does not match|malformed/,
+      );
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses an operation the resource does not support', async () => {
+    const { client, calls } = harness();
+    await expect(
+      commitOperation(client, forge({ operation: 'frobnicate' }), openPolicy()),
+    ).rejects.toThrow(/not an operation/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('applies the deletes gate at commit', async () => {
+    const { client, calls } = harness();
+    openPolicy();
+    delete process.env.PRODUCTIVE_ENABLE_DELETES;
+    const staged = forge({ operation: 'delete', method: 'DELETE', body: undefined });
+    await expect(commitOperation(client, staged, { policy: loadPolicy() })).rejects.toThrow(
+      /PRODUCTIVE_ENABLE_DELETES/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it('treats a DELETE-method action as a delete', async () => {
+    const { client, calls } = harness();
+    openPolicy();
+    delete process.env.PRODUCTIVE_ENABLE_DELETES;
+    await expect(
+      runAction(
+        client,
+        { resource: 'expenses', action: 'bulk_delete', filters: { id: '1' } },
+        { policy: loadPolicy() },
+      ),
+    ).rejects.toThrow(/PRODUCTIVE_ENABLE_DELETES/);
+
+    const staged = forge({
+      operation: 'action:bulk_delete',
+      resource: 'expenses',
+      method: 'DELETE',
+      path: '/expenses',
+      tier: 'financial',
+      filters: { id: '1' },
+      body: undefined,
+    });
+    await expect(commitOperation(client, staged, { policy: loadPolicy() })).rejects.toThrow(
+      /PRODUCTIVE_ENABLE_DELETES/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it('re-runs the resource allow and deny lists at commit', async () => {
+    const { client, calls } = harness();
+    openPolicy();
+    process.env.PRODUCTIVE_DENIED_RESOURCES = 'tasks';
+    await expect(commitOperation(client, forge({}), { policy: loadPolicy() })).rejects.toThrow(
+      /resource denied by policy/,
+    );
+    delete process.env.PRODUCTIVE_DENIED_RESOURCES;
+    process.env.PRODUCTIVE_ALLOWED_RESOURCES = 'projects';
+    await expect(commitOperation(client, forge({}), { policy: loadPolicy() })).rejects.toThrow(
+      /not in PRODUCTIVE_ALLOWED_RESOURCES/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('path parameters', () => {
+  const unsafe = ['', '.', '..', '1/2', '1\\2', '1?x=1', '1#x', '%2e%2e', '1%2f2', '1%5C2'];
+  for (const id of unsafe) {
+    it(`refuses id ${JSON.stringify(id)}`, async () => {
+      const { client, calls } = harness();
+      await expect(getRecord(client, { resource: 'tasks', id }, openPolicy())).rejects.toThrow(
+        /Invalid id/,
+      );
+      await expect(
+        updateRecord(client, { resource: 'tasks', id, attributes: { title: 'x' } }, openPolicy()),
+      ).rejects.toThrow(/Invalid id/);
+      await expect(deleteRecord(client, { resource: 'tasks', id }, openPolicy())).rejects.toThrow(
+        /Invalid id/,
+      );
+      expect(calls).toHaveLength(0);
+    });
+  }
 });
 
 describe('time tracking', () => {

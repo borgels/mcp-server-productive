@@ -10,7 +10,6 @@ import {
   validateGroup,
   validateInclude,
   validateSort,
-  type ActionContract,
   type GeneratedResource,
 } from './registry.js';
 import {
@@ -23,12 +22,18 @@ import {
 } from './policy.js';
 import { prepareOperation, verifyPreparedOperation, type PreparedOperation } from './operations.js';
 import { audited } from './audit.js';
+import { assertSafePathSegment, encodePathSegment } from './path-params.js';
 import type { CallerIdentity } from './identity.js';
 import type { HttpMethod, Tier } from './registry-types.js';
 
 export interface ExecutionContext {
   policy?: ProductivePolicy;
   identity?: CallerIdentity;
+  /**
+   * The caller as forwarded by the gateway. A staged operation is bound to it,
+   * so only the caller who prepared a change can commit it.
+   */
+  user?: string;
 }
 
 /** Either the write happened, or it was staged and needs committing. */
@@ -101,7 +106,7 @@ export async function getRecord(
   validateInclude(resource, input.include, true);
 
   const response = await client.request({
-    path: `${resource.path}/${encodeURIComponent(input.id)}`,
+    path: `${resource.path}/${encodePathSegment(input.id)}`,
     include: input.include,
   });
 
@@ -316,7 +321,7 @@ export async function updateRecord(
     requireRequired: false,
     what: `Updating a "${resource.key}"`,
   });
-  const path = `${resource.path}/${encodeURIComponent(input.id)}`;
+  const path = `${resource.path}/${encodePathSegment(input.id)}`;
 
   return dispatch(client, {
     operation: 'update',
@@ -351,7 +356,7 @@ export async function deleteRecord(
     resource: resource.key,
     tier: resource.tier,
     method: 'DELETE',
-    path: `${resource.path}/${encodeURIComponent(input.id)}`,
+    path: `${resource.path}/${encodePathSegment(input.id)}`,
     effect: `Delete ${resource.tag} ${input.id}.`,
     warnings: [
       'Deletion. Some Productive types appear in `deleted_items` afterwards and can be restored (verified for tasks), but this is not guaranteed for every type — check before relying on it.',
@@ -390,7 +395,7 @@ export async function runAction(
   }
 
   const isRead = action.method === 'GET';
-  gate(resource, `action:${action.name}`, !isRead, context, action.tier);
+  gate(resource, `action:${action.name}`, !isRead, context, action.tier, action.method === 'DELETE');
 
   const body = action.body
     ? validateBody(action.body, { attributes: input.attributes }, {
@@ -399,7 +404,9 @@ export async function runAction(
       })
     : undefined;
 
-  const path = action.path.replace('{id}', encodeURIComponent(input.id ?? ''));
+  const path = action.path.includes('{id}')
+    ? action.path.replace('{id}', encodePathSegment(input.id))
+    : action.path;
 
   if (isRead) {
     const response = await client.request({ method: 'GET', path, filters: input.filters });
@@ -430,6 +437,7 @@ export async function runAction(
     warnings,
     twoStep: requiresTwoStep({
       tier: action.tier,
+      isDelete: action.method === 'DELETE',
       collectionWide: action.collectionWide,
       outward: action.outward,
     }),
@@ -440,27 +448,40 @@ export async function runAction(
 /**
  * Execute a staged operation.
  *
- * The tier is taken from the registry again rather than from the payload. The
- * hash already covers the tier, so a tampered one cannot verify — but deriving
- * it here means the policy decision at commit time never depends on a value
- * that arrived from outside.
+ * Nothing that decides what is sent or whether it is allowed is taken on trust
+ * from the payload. The signature, expiry and owner are verified; then the HTTP
+ * method and path template are derived again from the registry for the
+ * resource and operation, the supplied path must be that template with only a
+ * safe id substituted, and every policy check runs again against the derived
+ * tier and method.
  */
 export async function commitOperation(
   client: ProductiveClient,
   staged: PreparedOperation,
   context: ExecutionContext = {},
 ): Promise<{ status: 'done'; record: FlatRecord | null; raw?: unknown }> {
-  const operation = verifyPreparedOperation(staged);
+  const operation = verifyPreparedOperation(staged, { actingAs: context.user });
   const resource = requireResource(operation.resource);
+  const expected = expectedRequest(resource, operation.operation);
 
-  let tier: Tier = resource.tier;
-  let action: ActionContract | undefined;
-  if (operation.operation.startsWith('action:')) {
-    action = requireAction(operation.resource, operation.operation.slice('action:'.length));
-    tier = action.tier;
+  if (operation.method !== expected.method) {
+    throw new Error(
+      `Refused: "${operation.operation}" on "${resource.key}" is ${expected.method}, not ${operation.method}.`,
+    );
+  }
+  if (expected.method === 'GET') {
+    throw new Error('Refused: read actions are not staged and cannot be committed.');
+  }
+  assertPathMatchesTemplate(operation.path, expected.template);
+  if (operation.filters !== undefined && !expected.allowsFilters) {
+    throw new Error(`Refused: "${operation.operation}" does not take filters.`);
+  }
+  if (operation.operation === 'delete' && operation.body !== undefined) {
+    throw new Error('Refused: a delete does not take a body.');
   }
 
-  const isDelete = operation.operation === 'delete';
+  const tier = expected.tier;
+  const isDelete = expected.method === 'DELETE';
   const decision = checkPolicy(
     {
       resource: resource.key,
@@ -480,10 +501,10 @@ export async function commitOperation(
       tool: 'productive_commit_operation',
       resource: resource.key,
       operation: operation.operation,
-      method: operation.method,
+      method: expected.method,
       path: operation.path,
       tier,
-      user: context.identity?.email,
+      user: context.identity?.email ?? context.user,
       organizationId: client.organization,
       allowed: true,
       reason: decision.reason,
@@ -491,7 +512,7 @@ export async function commitOperation(
     },
     () =>
       client.request({
-        method: operation.method,
+        method: expected.method,
         path: operation.path,
         filters: operation.filters,
         body: operation.body,
@@ -499,6 +520,77 @@ export async function commitOperation(
   );
 
   return { status: 'done', record: flattenSingle(response), raw: response };
+}
+
+interface ExpectedRequest {
+  method: HttpMethod;
+  /** Path template from the registry, with `{id}` where an id belongs. */
+  template: string;
+  tier: Tier;
+  allowsFilters: boolean;
+}
+
+/** The request the registry says an operation on a resource makes. */
+function expectedRequest(resource: GeneratedResource, operation: string): ExpectedRequest {
+  switch (operation) {
+    case 'create':
+      if (!resource.create) break;
+      return { method: 'POST', template: resource.path, tier: resource.tier, allowsFilters: false };
+    case 'update':
+      if (!resource.update) break;
+      return {
+        method: 'PATCH',
+        template: `${resource.path}/{id}`,
+        tier: resource.tier,
+        allowsFilters: false,
+      };
+    case 'delete':
+      if (!resource.remove) break;
+      return {
+        method: 'DELETE',
+        template: `${resource.path}/{id}`,
+        tier: resource.tier,
+        allowsFilters: false,
+      };
+    default:
+      if (operation.startsWith('action:')) {
+        const action = requireAction(resource.key, operation.slice('action:'.length));
+        return { method: action.method, template: action.path, tier: action.tier, allowsFilters: true };
+      }
+  }
+  throw new Error(`Refused: "${operation}" is not an operation "${resource.key}" supports.`);
+}
+
+/** The path must be the template with nothing but a safe id put into `{id}`. */
+function assertPathMatchesTemplate(path: string, template: string): void {
+  const marker = template.indexOf('{id}');
+  if (marker === -1) {
+    if (path !== template) {
+      throw new Error(`Refused: the path ${path} does not match the registry path ${template}.`);
+    }
+    return;
+  }
+  const prefix = template.slice(0, marker);
+  const suffix = template.slice(marker + '{id}'.length);
+  if (
+    typeof path !== 'string' ||
+    !path.startsWith(prefix) ||
+    !path.endsWith(suffix) ||
+    path.length <= prefix.length + suffix.length
+  ) {
+    throw new Error(`Refused: the path ${path} does not match the registry path ${template}.`);
+  }
+  const encoded = path.slice(prefix.length, path.length - suffix.length);
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(encoded);
+  } catch {
+    throw new Error(`Refused: the path ${path} carries a malformed id.`);
+  }
+  assertSafePathSegment(decoded);
+  if (encodeURIComponent(decoded) !== encoded) {
+    throw new Error(`Refused: the path ${path} does not match the registry path ${template}.`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -596,7 +688,7 @@ function resolveMinutes(input: TrackTimeInput): number {
 
 async function serviceForTask(client: ProductiveClient, taskId: string): Promise<string> {
   const response = await client.request({
-    path: `/tasks/${encodeURIComponent(taskId)}`,
+    path: `/tasks/${encodePathSegment(taskId, 'taskId')}`,
   });
   const task = flattenSingle(response);
   const service = (task?.relationships as Record<string, FlatRecord> | undefined)?.service;
@@ -645,6 +737,7 @@ async function dispatch(
         body: input.body,
         effect: input.effect,
         warnings: input.warnings,
+        actingAs: input.context.user,
       }),
       next:
         'Nothing has been sent to Productive. Show this change, then pass the whole operation object ' +
@@ -705,6 +798,7 @@ function gate(
   isMutation: boolean,
   context: ExecutionContext,
   tierOverride?: Tier,
+  isDelete: boolean = operation === 'delete',
 ): void {
   const decision = checkPolicy(
     {
@@ -712,7 +806,7 @@ function gate(
       tier: tierOverride ?? resource.tier,
       operation,
       isMutation,
-      isDelete: operation === 'delete',
+      isDelete,
     },
     context.policy,
   );
