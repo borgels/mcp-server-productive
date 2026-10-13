@@ -121,9 +121,13 @@ Ordinary project work — a task, a time entry, a booking, a comment — is writ
 Requiring a handshake around every time entry would make the server unusable for the thing people
 do most.
 
-Everything with a wider blast radius is **staged**: the tool returns the exact request plus a hash
-and sends nothing, and `productive_commit_operation` runs it only if the operation comes back
-unaltered. That covers the financial and admin tiers, every delete, anything that leaves the
+Everything with a wider blast radius is **staged**: the tool returns the exact request plus an
+HMAC-SHA256 signature and sends nothing, and `productive_commit_operation` runs it only if the
+operation comes back unaltered, within 15 minutes, from the same caller that prepared it. At commit
+the HTTP method and path are derived again from the registry for the operation's resource and verb
+(the path may differ from the template only by a single, safe id), and every policy check runs
+again. The signing key is `PRODUCTIVE_PREPARE_SECRET`; when unset, a random key is generated at
+start-up, so staged operations do not survive a restart and are not valid across replicas. That covers the financial and admin tiers, every delete, anything that leaves the
 organization, and every `bulk_*` action — those act on all records a filter matches, so they also
 refuse to run without an explicit filter.
 
@@ -172,7 +176,8 @@ Sharp edges:
 - **Identity comes only from the gateway.** `X-MCP-User` is read only when
   `PRODUCTIVE_TRUST_FORWARDED_USER=true`, never from anything the MCP client controls. Enable it
   only behind a gateway that sets the header from a validated token *and strips a client-supplied
-  copy* — otherwise a caller can name any identity and act as them.
+  copy* — otherwise a caller can name any identity and act as them. The HTTP transport refuses
+  to start with this on unless `MCP_HTTP_TOKEN` is set too.
 - **No fallback.** An un-enrolled caller gets `NOT_CONNECTED`, never the shared token, even if
   `PRODUCTIVE_API_TOKEN` happens to be set. A fallback would hand them borrowed rights, which is
   the failure this mode exists to remove.
