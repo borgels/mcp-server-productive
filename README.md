@@ -243,7 +243,7 @@ integrations in Productive; it inherits the creating user's permissions) and
 | `MCP_AUTH_FAILURE_LIMIT` | `20` | Failed authentication attempts per client address and window before further failures get 429; `0` disables. Valid tokens are never throttled. |
 | `MCP_AUTH_FAILURE_WINDOW_MS` | `60000` | Window for the limit above. |
 
-`GET /healthz` answers `{"status":"ok"}` without authentication. 401 responses carry
+`GET /healthz` answers `{"ok":true,"perUserAuth":<true|false>}` without authentication. 401 responses carry
 `WWW-Authenticate: Bearer`; invalid JSON gets 400. The server shuts down gracefully on SIGTERM/SIGINT.
 
 `/healthz` and `/productive/enroll` are served without the bearer token (the enrollment page is
