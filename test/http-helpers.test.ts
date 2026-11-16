@@ -20,7 +20,8 @@ const request = (authorization?: string) =>
 describe('MCP_HTTP_TOKEN check', () => {
   it('accepts only the exact bearer token', () => {
     expect(() => assertAuthorized(request('Bearer s3cret'), config('s3cret'))).not.toThrow();
-    for (const header of [undefined, '', 'Bearer s3cre', 'Bearer s3cret ', 'bearer s3cret', 's3cret']) {
+    // The scheme is case-insensitive and trailing spaces are ignored (RFC 9110); the token itself is exact.
+    for (const header of [undefined, '', 'Bearer s3cre', 'Bearer s3cretX', 'Bearer s3cret extra', 'Basic s3cret', 's3cret']) {
       expect(() => assertAuthorized(request(header), config('s3cret'))).toThrow(/Unauthorized/);
     }
   });

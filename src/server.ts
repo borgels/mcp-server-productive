@@ -3,11 +3,12 @@ import { ProductiveClient, type ProductiveClientOptions } from './productive/cli
 import { registerProductiveTools } from './tools/productive.js';
 import { describePolicy, loadPolicy, perUserAuthEnabled } from './productive/policy.js';
 import type { CredentialStore } from './productive/store.js';
+import { PACKAGE_VERSION } from './version.js';
 
 export interface CreateServerOptions {
   client?: ProductiveClient;
   clientOptions?: ProductiveClientOptions;
-  /** Caller address, forwarded by an authenticating gateway (X-MCP-User). */
+  /** Caller address, forwarded by an authenticating proxy (X-MCP-User). */
   onBehalfOf?: string;
   /** Per-user token store — required when PRODUCTIVE_PER_USER_AUTH=true. */
   store?: CredentialStore;
@@ -58,7 +59,7 @@ whether they are linked.`;
 
 export function createServer(options: CreateServerOptions = {}): McpServer {
   const server = new McpServer(
-    { name: 'mcp-server-productive', version: '0.2.0' },
+    { name: 'mcp-server-productive', version: PACKAGE_VERSION },
     { instructions: INSTRUCTIONS },
   );
 

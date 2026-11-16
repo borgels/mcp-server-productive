@@ -1,4 +1,5 @@
-import { ProductiveHttpError } from '../errors.js';
+import { ConfigError, readEnvInteger } from '../config-env.js';
+import { ProductiveHttpError, redactUrl, registerSecret } from '../errors.js';
 import type { HttpMethod } from './registry-types.js';
 
 const DEFAULT_BASE_URL = 'https://api.productive.io/api/v2';
@@ -9,6 +10,9 @@ const DEFAULT_BASE_URL = 'https://api.productive.io/api/v2';
  * here.
  */
 const JSON_API = 'application/vnd.api+json';
+/** Error responses are read up to this many bytes. */
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
+const MAX_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Productive caps a page at 200 records and silently clamps anything larger. */
 export const MAX_PAGE_SIZE = 200;
@@ -81,13 +85,17 @@ export class ProductiveClient {
 
   constructor(options: ProductiveClientOptions = {}) {
     this.apiToken = options.apiToken ?? process.env.PRODUCTIVE_API_TOKEN;
+    registerSecret(this.apiToken);
     this.organizationId = options.organizationId ?? process.env.PRODUCTIVE_ORGANIZATION_ID;
     this.baseUrl = trimTrailingSlash(
       options.baseUrl ?? process.env.PRODUCTIVE_BASE_URL ?? DEFAULT_BASE_URL,
     );
     assertSafeBaseUrl(this.baseUrl);
     this.fetchImpl = options.fetchImpl ?? fetch;
-    this.timeoutMs = options.timeoutMs ?? Number(process.env.PRODUCTIVE_TIMEOUT_MS ?? 30_000);
+    this.timeoutMs = options.timeoutMs ?? readEnvInteger('PRODUCTIVE_TIMEOUT_MS', 30_000, { max: MAX_TIMEOUT_MS });
+    if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs < 1) {
+      throw new ConfigError('timeoutMs must be a positive integer.');
+    }
   }
 
   /** The organization this server is pinned to. */
@@ -137,11 +145,22 @@ export class ProductiveClient {
         Accept: JSON_API,
       },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      // Never follow redirects: fetch would re-send the custom X-Auth-Token
+      // header to wherever the Location points, including other origins.
+      redirect: 'manual',
       signal: AbortSignal.timeout(this.timeoutMs),
     });
 
-    const payload = await readBody(response);
+    if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new Error(
+        `Productive API responded with a redirect (HTTP ${response.status}) for ${method} ${redactUrl(url)}; ` +
+          'redirects are not followed. Check PRODUCTIVE_BASE_URL.',
+      );
+    }
+
     if (!response.ok) {
+      const payload = await readErrorBody(response);
       throw new ProductiveHttpError({
         status: response.status,
         method,
@@ -151,6 +170,8 @@ export class ProductiveClient {
         retryAfter: response.headers.get('retry-after') ?? undefined,
       });
     }
+
+    const payload = await readBody(response);
 
     // 204 on a successful action or delete; normalise it to an empty envelope
     // so callers do not have to special-case "no content" against "no data".
@@ -200,6 +221,52 @@ function appendFilter(params: URLSearchParams, prefix: string, value: FilterValu
     return;
   }
   params.set(prefix, String(value));
+}
+
+/** Read at most `limit` bytes of the body; cancels the rest and reports whether it was longer. */
+async function readUpTo(response: Response, limit: number): Promise<{ bytes: Uint8Array; exceeded: boolean }> {
+  if (!response.body) {
+    return { bytes: new Uint8Array(0), exceeded: false };
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let exceeded = false;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    if (total + value.byteLength > limit) {
+      chunks.push(value.subarray(0, limit - total));
+      total = limit;
+      exceeded = true;
+      await reader.cancel().catch(() => undefined);
+      break;
+    }
+    chunks.push(value);
+    total += value.byteLength;
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { bytes, exceeded };
+}
+
+/** Error bodies are read up to a small limit; JSON is parsed only when complete. */
+async function readErrorBody(response: Response): Promise<unknown> {
+  const { bytes, exceeded } = await readUpTo(response, MAX_ERROR_BODY_BYTES);
+  const text = new TextDecoder().decode(bytes);
+  if (!text) return null;
+  if (exceeded) return text;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text;
+  }
 }
 
 async function readBody(response: Response): Promise<unknown> {

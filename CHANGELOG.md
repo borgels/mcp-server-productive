@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.0
+
+### Upgrade notes
+
+- The HTTP server refuses to start on a non-loopback bind (`MCP_HTTP_HOST`/`HOST` other than
+  127.0.0.1/localhost/::1), or with `MCP_ALLOW_ANY_ORIGIN=true`, unless `MCP_HTTP_TOKEN` is set.
+  `MCP_HTTP_ALLOW_UNAUTHENTICATED=true` is an explicit escape hatch for networks restricted by
+  other means. `PRODUCTIVE_TRUST_FORWARDED_USER=true` still always requires the token.
+- `MCP_HTTP_TOKEN` must be at least 32 printable ASCII characters (e.g. `openssl rand -hex 32`).
+  The `Bearer` scheme is now matched case-insensitively.
+- `PORT`, `MCP_MAX_BODY_BYTES`, `PRODUCTIVE_TIMEOUT_MS` and the boolean `MCP_*` flags are
+  validated; invalid values stop the server at startup instead of becoming NaN.
+- New optional variables: `MCP_HTTP_ALLOW_UNAUTHENTICATED`, `MCP_ALLOWED_HOSTS`,
+  `MCP_AUTH_FAILURE_LIMIT`, `MCP_AUTH_FAILURE_WINDOW_MS`.
+- `/healthz` and `/productive/enroll` are unchanged and remain reachable without the token.
+
+### Changes
+
+- HTTP: 401 responses carry `WWW-Authenticate: Bearer`; invalid JSON gets 400 (JSON-RPC parse
+  error) instead of 500; oversized bodies get 413 before the body is read when `Content-Length`
+  is too large (also on the enrollment form).
+- HTTP: failed authentication on `/mcp` is counted per client address; after the limit further
+  failures get 429 with `Retry-After`. Valid tokens are never throttled.
+- HTTP: `Host` header check on `/mcp` for loopback binds; graceful shutdown on SIGTERM/SIGINT;
+  one log line per rejected request (without query strings).
+- Productive client: redirects are never followed, so `X-Auth-Token` is only sent to
+  `PRODUCTIVE_BASE_URL`. Error bodies are read up to 64 KB; configured and enrolled tokens are
+  redacted by value before error text is truncated.
+- The server reports the package version.
+- Dependencies updated within their ranges; `fast-uri` and `@hono/node-server` overrides moved to
+  the patched lines declared by their dependents. Container images are published only after CI
+  passes, with SBOM and provenance attestations; Dependabot configuration added.
+
 ## 0.2.0
 
 Per-user authentication.
