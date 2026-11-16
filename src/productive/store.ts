@@ -15,9 +15,6 @@ import { dirname, join } from 'node:path';
  *
  * Tokens are encrypted at rest with AES-256-GCM, one row per gateway-verified
  * identity, so a caller can only ever reach their own row.
- *
- * This is the same shape as the sibling Snipe-IT and Hevy connectors, on
- * purpose: one enrollment flow for people to learn, not three.
  */
 
 export interface UserCredentials {

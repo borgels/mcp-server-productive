@@ -1,4 +1,5 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createServer as createMcpServer } from '../server.js';
 import type { ProductiveClient } from '../productive/client.js';
@@ -6,9 +7,13 @@ import type { CredentialStore } from '../productive/store.js';
 import { verifyAndStore } from '../productive/enroll.js';
 import { forwardedUser } from '../productive/identity.js';
 import {
+  assertAllowedHost,
   assertAllowedOrigin,
   assertAuthorized,
+  AuthFailureLimiter,
   corsHeaders,
+  DEFAULT_AUTH_FAILURE_LIMIT,
+  DEFAULT_AUTH_FAILURE_WINDOW_MS,
   getHttpConfig,
   HttpRequestError,
   readJsonBody,
@@ -17,11 +22,8 @@ import {
 } from './http-helpers.js';
 
 /**
- * The whole HTTP surface, with its dependencies injected.
- *
- * Built this way so it is testable: an earlier sibling connector did all of
- * this in import-time side effects, and the enrollment flow could then only be
- * exercised by starting a real server on a real port.
+ * The whole HTTP surface, with its dependencies injected, so the enrollment
+ * flow and /mcp can be tested without import-time side effects.
  */
 export interface HttpAppOptions {
   config: HttpConfig;
@@ -34,6 +36,10 @@ export interface HttpAppOptions {
    */
   enrollClient: ProductiveClient;
   publicBaseUrl?: string;
+  /** Factory for the per-request MCP server (tests inject a fake client). */
+  createMcpServer?: (options: Parameters<typeof createMcpServer>[0]) => McpServer;
+  /** Defaults to console.error. */
+  log?: (line: string) => void;
 }
 
 /** Bodies posted to the enrollment form; a token is a few hundred bytes. */
@@ -41,8 +47,17 @@ const MAX_FORM_BYTES = 64 * 1024;
 
 export function createHttpApp(options: HttpAppOptions): RequestListener {
   const { config, perUser, store, enrollClient } = options;
+  const buildMcpServer = options.createMcpServer ?? createMcpServer;
+  const log = options.log ?? ((line: string) => console.error(line));
+  const failureLimit = config.authFailureLimit ?? DEFAULT_AUTH_FAILURE_LIMIT;
+  const limiter = failureLimit > 0
+    ? new AuthFailureLimiter(failureLimit, config.authFailureWindowMs ?? DEFAULT_AUTH_FAILURE_WINDOW_MS)
+    : undefined;
 
   return async (req, res) => {
+    const remote = req.socket.remoteAddress ?? 'unknown';
+    // Query strings are not logged: the enrollment state token travels there.
+    const describeRequest = () => `${req.method ?? '-'} ${(req.url ?? '').split('?')[0]?.slice(0, 200)} from ${remote}`;
     try {
       const url = new URL(req.url ?? '/', 'http://localhost');
 
@@ -54,10 +69,10 @@ export function createHttpApp(options: HttpAppOptions): RequestListener {
       }
 
       // The enrollment pages are reached by a person's BROWSER, which cannot
-      // carry the gateway's bearer token — so they sit outside that check by
-      // design. Their security is the single-use, identity-bound state token,
-      // which is why the path must be routed straight to this container rather
-      // than through the MCP gateway.
+      // carry the bearer token, so they sit outside that check by design.
+      // Their security is the single-use, identity-bound state token; the path
+      // is meant to be routed to this server by an authenticating reverse
+      // proxy rather than through the MCP endpoint.
       if (url.pathname === '/productive/enroll') {
         if (!perUser || !store) {
           sendHtml(res, 404, page('Not available', '<p>Per-user authentication is not enabled on this server.</p>'));
@@ -76,58 +91,88 @@ export function createHttpApp(options: HttpAppOptions): RequestListener {
       }
 
       if (url.pathname !== '/mcp') {
-        sendJson(res, 404, { error: 'Not found' }, req);
-        return;
+        throw new HttpRequestError(404, 'Not found');
       }
 
-      assertAllowedOrigin(req);
+      assertAllowedHost(req, config);
+      assertAllowedOrigin(req, config);
 
       if (req.method === 'OPTIONS') {
-        res.writeHead(204, corsHeaders(req));
+        res.writeHead(204, corsHeaders(req, config));
         res.end();
         return;
       }
 
       if (req.method !== 'POST') {
-        sendJson(res, 405, { error: 'Method not allowed' }, req, { Allow: 'POST' });
-        return;
+        throw new HttpRequestError(405, 'Method not allowed', { headers: { Allow: 'POST, OPTIONS' } });
       }
 
-      assertAuthorized(req, config);
+      try {
+        assertAuthorized(req, config);
+      } catch (error) {
+        // Only failing requests are counted and throttled; a valid token is never blocked.
+        if (limiter) {
+          const retryAfter = limiter.retryAfterSeconds(remote);
+          if (retryAfter > 0) {
+            sendJson(res, 429, { error: 'Too many failed authentication attempts' }, req, {
+              'Retry-After': String(retryAfter),
+            }, config);
+            return;
+          }
+          if (limiter.recordFailure(remote)) {
+            log(`[http] ${remote} reached ${failureLimit} failed authentication attempts; further failures get 429`);
+          }
+        }
+        throw error;
+      }
+
       const body = await readJsonBody(req, config.maxBodyBytes);
 
-      // Who the gateway says is asking. Read only when
+      // Who the authenticating proxy says is asking. Read only when
       // PRODUCTIVE_TRUST_FORWARDED_USER is on — forwardedUser() enforces that —
       // because any MCP client can set a header, and in per-user mode this
       // value decides whose token is used.
       const onBehalfOf = forwardedUser(headerValue(req.headers['x-mcp-user']));
 
-      const mcpServer = createMcpServer({
+      const mcpServer = buildMcpServer({
         onBehalfOf,
         store,
         publicBaseUrl: options.publicBaseUrl,
       });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
 
-      await mcpServer.connect(transport);
-      await transport.handleRequest(req, res, body);
-
       res.on('close', () => {
         void transport.close();
         void mcpServer.close();
       });
+
+      for (const [name, value] of Object.entries(corsHeaders(req, config))) {
+        res.setHeader(name, value);
+      }
+
+      await mcpServer.connect(transport);
+      await transport.handleRequest(req, res, body);
     } catch (error) {
-      console.error(error);
-      if (res.headersSent) return;
       if (error instanceof HttpRequestError) {
-        sendJson(res, error.status, { error: error.message }, req);
+        log(`[http] ${error.status} ${describeRequest()}: ${error.message}`);
+        if (!res.headersSent && !res.destroyed) {
+          const payload = error.jsonRpcCode === undefined
+            ? { error: error.message }
+            : { jsonrpc: '2.0', error: { code: error.jsonRpcCode, message: error.message }, id: null };
+          sendJson(res, error.status, payload, req, error.headers, config);
+        }
         return;
       }
+
+      log(`[http] 500 ${describeRequest()}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
+      if (res.headersSent || res.destroyed) return;
       sendJson(
         res,
         500,
         { jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null },
         req,
+        {},
+        config,
       );
     }
   };
@@ -231,13 +276,20 @@ async function handleEnrollSubmit(
 
 /** Read a form body as text, refusing anything larger than a token could be. */
 async function readRawBody(req: IncomingMessage, maxBytes: number): Promise<string> {
+  const declared = Number(req.headers['content-length']);
+  if (Number.isFinite(declared) && declared > maxBytes) throw new HttpRequestError(413, 'Payload too large');
   const chunks: Buffer[] = [];
   let total = 0;
-  for await (const chunk of req) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
-    total += buffer.byteLength;
-    if (total > maxBytes) throw new HttpRequestError(413, 'Payload too large');
-    chunks.push(buffer);
+  try {
+    for await (const chunk of req) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+      total += buffer.byteLength;
+      if (total > maxBytes) throw new HttpRequestError(413, 'Payload too large');
+      chunks.push(buffer);
+    }
+  } catch (error) {
+    if (error instanceof HttpRequestError) throw error;
+    throw new HttpRequestError(400, 'Request body could not be read (connection aborted)');
   }
   return Buffer.concat(chunks).toString('utf8');
 }

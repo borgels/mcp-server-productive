@@ -19,6 +19,36 @@ export interface ProductiveHttpErrorInit {
   retryAfter?: string;
 }
 
+/** Maximum length of any single piece of text taken from a response body. */
+export const MAX_ERROR_TEXT = 500;
+const MAX_ERRORS_SHOWN = 10;
+/** Configured secrets shorter than this are not redacted by value (too likely to hit normal text). */
+const MIN_SECRET_LENGTH = 8;
+
+const registeredSecrets = new Set<string>();
+
+/** Redact this exact value (and its URL-encoded form) wherever it appears in error text. */
+export function registerSecret(value: string | undefined): void {
+  if (!value || value.length < MIN_SECRET_LENGTH) return;
+  registeredSecrets.add(value);
+  const encoded = encodeURIComponent(value);
+  if (encoded !== value) registeredSecrets.add(encoded);
+}
+
+/** Replace every registered token value in the text. */
+export function redactSecrets(value: string): string {
+  let result = value;
+  for (const secret of registeredSecrets) {
+    result = result.split(secret).join('[REDACTED]');
+  }
+  return result;
+}
+
+/** Truncate after redaction, so a secret cut in half is never left behind. */
+export function truncate(value: string, max: number = MAX_ERROR_TEXT): string {
+  return value.length > max ? `${value.slice(0, max)}… [truncated, ${value.length} chars]` : value;
+}
+
 /**
  * Error for a non-2xx response from Productive, with the JSON:API error array
  * unpacked into something a tool result can show.
@@ -61,11 +91,16 @@ function buildMessage(
 ): string {
   const hint = explain(status, errors);
   const detail = errors
+    .slice(0, MAX_ERRORS_SHOWN)
     .map(error => {
       const where = error.source?.parameter ?? error.source?.pointer;
-      return [error.code, error.detail ?? error.title, where && `at ${where}`]
-        .filter(Boolean)
-        .join(' — ');
+      return truncate(
+        redactSecrets(
+          [error.code, error.detail ?? error.title, where && `at ${where}`]
+            .filter(value => typeof value === 'string' && value)
+            .join(' — '),
+        ),
+      );
     })
     .filter(Boolean)
     .join('; ');
@@ -74,7 +109,7 @@ function buildMessage(
     `Productive API ${method} ${url} failed with HTTP ${status}`,
     detail || undefined,
     hint || undefined,
-    requestId ? `(request id ${requestId})` : undefined,
+    requestId ? `(request id ${truncate(requestId, 128)})` : undefined,
   ]
     .filter(Boolean)
     .join(' | ');
@@ -134,6 +169,6 @@ export function redactUrl(value: string): string {
 }
 
 export function formatUnknownError(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return String(error);
+  if (error instanceof Error) return redactSecrets(error.message);
+  return redactSecrets(String(error));
 }
