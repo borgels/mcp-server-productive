@@ -1,0 +1,73 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.borgels/mcp-server-productive",
+  "title": "Productive",
+  "description": "Policy-aware MCP server for the Productive.io API: projects, tasks, time, financials and CRM.",
+  "repository": {
+    "url": "https://github.com/borgels/mcp-server-productive",
+    "source": "github"
+  },
+  "version": "0.3.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "mcp-server-productive",
+      "version": "0.3.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "PRODUCTIVE_API_TOKEN",
+          "description": "Productive API token (Settings, API integrations).",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "PRODUCTIVE_ORGANIZATION_ID",
+          "description": "Numeric Productive organization id.",
+          "isRequired": true
+        },
+        {
+          "name": "PRODUCTIVE_ENABLE_WRITES",
+          "description": "Enable write tools.",
+          "format": "boolean",
+          "default": "false"
+        },
+        {
+          "name": "PRODUCTIVE_ENABLE_FINANCIALS",
+          "description": "Enable financial write tools (requires writes).",
+          "format": "boolean",
+          "default": "false"
+        },
+        {
+          "name": "PRODUCTIVE_ENABLE_ADMIN",
+          "description": "Enable access and organization configuration tools (requires writes).",
+          "format": "boolean",
+          "default": "false"
+        },
+        {
+          "name": "PRODUCTIVE_ENABLE_DELETES",
+          "description": "Enable deletes (requires writes).",
+          "format": "boolean",
+          "default": "false"
+        },
+        {
+          "name": "PRODUCTIVE_ALLOWED_RESOURCES",
+          "description": "Comma-separated resource keys this instance may access."
+        },
+        {
+          "name": "PRODUCTIVE_DENIED_RESOURCES",
+          "description": "Comma-separated resource keys this instance may not access."
+        },
+        {
+          "name": "PRODUCTIVE_AUDIT_LOG",
+          "description": "Path of the JSONL audit log.",
+          "format": "filepath"
+        }
+      ]
+    }
+  ]
+}

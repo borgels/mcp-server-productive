@@ -271,6 +271,14 @@ read.
   Error bodies are read up to 64 KB, tokens are redacted before error text is truncated, and error
   URLs omit query strings.
 
+## Install
+
+```bash
+npx mcp-server-productive
+```
+
+Runs the stdio server from npm. Configure it with the environment variables in `.env.example`.
+
 ## Run
 
 ```bash
