@@ -74,7 +74,7 @@ afterEach(async () => {
 
 describe('/healthz', () => {
   it('answers without the bearer token, so a healthcheck needs no secret', async () => {
-    process.env.MCP_HTTP_TOKEN = 'gateway-token';
+    process.env.MCP_HTTP_TOKEN = 'gateway-token-0123456789abcdef0123456789';
     await listen({ store: new CredentialStore() });
     const response = await fetch(`${base}/healthz`);
     expect(response.status).toBe(200);
@@ -84,7 +84,7 @@ describe('/healthz', () => {
 
 describe('/mcp', () => {
   it('still requires the bearer token', async () => {
-    process.env.MCP_HTTP_TOKEN = 'gateway-token';
+    process.env.MCP_HTTP_TOKEN = 'gateway-token-0123456789abcdef0123456789';
     await listen({ store: new CredentialStore() });
     const response = await fetch(`${base}/mcp`, {
       method: 'POST',
@@ -99,7 +99,7 @@ describe('the enrollment page', () => {
   it('is reachable WITHOUT the gateway bearer token', async () => {
     // A person's browser cannot carry the gateway's token, so this path is
     // outside that check by design; its security is the single-use state.
-    process.env.MCP_HTTP_TOKEN = 'gateway-token';
+    process.env.MCP_HTTP_TOKEN = 'gateway-token-0123456789abcdef0123456789';
     const store = new CredentialStore();
     const state = store.createState(USER);
     await listen({ store });

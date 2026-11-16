@@ -7,6 +7,8 @@ Productive exposes about 650 operations over 132 resources. Turning those into 6
 would swamp any client's tool list, so this server is **twelve tools driven by a generated
 registry**: the tools are generic, and the registry knows what each resource really accepts.
 
+This is an independent, unofficial project. It is not developed, endorsed or supported by Productive.
+
 ## Tools
 
 **Discovery** — `productive_search_capabilities`, `productive_describe_resource`,
@@ -224,10 +226,50 @@ See `.env.example`. The two required variables are `PRODUCTIVE_API_TOKEN` (Setti
 integrations in Productive; it inherits the creating user's permissions) and
 `PRODUCTIVE_ORGANIZATION_ID` (the numeric id in your Productive URL).
 
+`PRODUCTIVE_TIMEOUT_MS` must be a plain integer; an invalid value stops the server at startup.
+
+### HTTP transport
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MCP_HTTP_HOST` / `HOST` | `127.0.0.1` | Bind address. |
+| `PORT` | `3000` | Listen port. |
+| `MCP_HTTP_TOKEN` | – | Bearer token required on `/mcp`. At least 32 printable ASCII characters, e.g. `openssl rand -hex 32`. Required for any non-loopback bind and with `MCP_ALLOW_ANY_ORIGIN=true`. |
+| `MCP_HTTP_ALLOW_UNAUTHENTICATED` | `false` | Serve a non-loopback bind without a token (only when access is restricted by other means). |
+| `MCP_ALLOWED_ORIGINS` | localhost origins | Comma-separated exact `Origin` values allowed. Requests without `Origin` (server-to-server) are allowed. |
+| `MCP_ALLOW_ANY_ORIGIN` | `false` | Allow every origin (requires `MCP_HTTP_TOKEN`). |
+| `MCP_ALLOWED_HOSTS` | – | Comma-separated host names accepted in the `Host` header. Without it, a loopback bind only accepts localhost names and no check is done on other binds. |
+| `MCP_MAX_BODY_BYTES` | `10485760` | Maximum request body. |
+| `MCP_AUTH_FAILURE_LIMIT` | `20` | Failed authentication attempts per client address and window before further failures get 429; `0` disables. Valid tokens are never throttled. |
+| `MCP_AUTH_FAILURE_WINDOW_MS` | `60000` | Window for the limit above. |
+
+`GET /healthz` answers `{"ok":true,"perUserAuth":<true|false>}` without authentication. 401 responses carry
+`WWW-Authenticate: Bearer`; invalid JSON gets 400. The server shuts down gracefully on SIGTERM/SIGINT.
+
+`/healthz` and `/productive/enroll` are served without the bearer token (the enrollment page is
+reached by a browser and protected by its single-use state token). The `Host` check applies to
+`/mcp` only. `PRODUCTIVE_TRUST_FORWARDED_USER=true` always requires `MCP_HTTP_TOKEN`, also with
+`MCP_HTTP_ALLOW_UNAUTHENTICATED=true`.
+
 Set `PRODUCTIVE_AUDIT_LOG` to append one JSON line per mutation attempt, including the ones policy
 refused. Request bodies are deliberately not recorded: they carry salaries, rates and personal
 data, and an audit trail that must be guarded as closely as the source system tends not to get
 read.
+
+## Security model
+
+- With per-user authentication each caller acts with their own enrolled Productive token, so
+  Productive applies that person's permissions. With a shared `PRODUCTIVE_API_TOKEN` every caller
+  acts as that token's owner.
+- Deciding who may reach this server, and asserting who the caller is (`X-MCP-User`), belongs in an
+  identity-aware gateway in front of it. `MCP_HTTP_TOKEN` only authenticates that gateway.
+- Tool access is not data access: the policy switches limit which tools and resources can be used,
+  not what the underlying token can read.
+- The HTTP server does not terminate TLS. Run it on a private network or behind a TLS-terminating
+  proxy; the enrollment page in particular must only be exposed over HTTPS.
+- Upstream redirects are never followed, so `X-Auth-Token` is only sent to `PRODUCTIVE_BASE_URL`.
+  Error bodies are read up to 64 KB, tokens are redacted before error text is truncated, and error
+  URLs omit query strings.
 
 ## Run
 

@@ -7,8 +7,7 @@ import { tokenOwner } from './resources.js';
  * Enrollment: a person hands this server their own Productive token, without
  * that token ever passing through the conversation.
  *
- * The flow is deliberately the same as the sibling Snipe-IT and Hevy
- * connectors. `productive_connect` mints a single-use, identity-bound link;
+ * `productive_connect` mints a single-use, identity-bound link;
  * the person opens it and pastes the token into a form served by this
  * container; the server verifies the token against Productive before storing
  * it, and reports which account it turned out to belong to.
