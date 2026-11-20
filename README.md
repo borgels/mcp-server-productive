@@ -256,6 +256,144 @@ refused. Request bodies are deliberately not recorded: they carry salaries, rate
 data, and an audit trail that must be guarded as closely as the source system tends not to get
 read.
 
+## Embedding (`./gateway`)
+
+`mcp-server-productive/gateway` lets a host application run a narrow set of
+tools in-process instead of over MCP, in the same shape as
+`mcp-server-template`. One process can run several gateway instances, for
+example one per tenant.
+
+```ts
+import { createProductiveGateway, productiveToolCatalog } from 'mcp-server-productive/gateway';
+
+const gateway = createProductiveGateway({
+  apiToken: tenant.productiveToken,
+  organizationId: tenant.productiveOrganizationId,
+  policy: { enableWrites: true, audit: record => log(record) },
+});
+const result = await gateway.callTool('list_tasks', { projectId: '701', open: true }, { caller: 'user-1' });
+```
+
+The module exports:
+
+- `createProductiveGateway({ apiToken, organizationId, baseUrl?, fetchImpl?, timeoutMs?, policy? })`.
+  `apiToken` and `organizationId` are required and never read from the
+  environment. `baseUrl` defaults to `https://api.productive.io/api/v2`
+  (`PRODUCTIVE_DEFAULT_BASE_URL`) and must be `https://`; `timeoutMs`
+  defaults to 30 seconds (1-600000). The gateway reads no `PRODUCTIVE_*`
+  variable at all: not the credentials, the base URL, the timeout, nor any
+  policy, per-user or audit variable. It has no per-user tokens, no caller
+  header (`X-MCP-User`) and no prepare/commit step: every call acts with the
+  instance's token in the instance's organization.
+- `gateway.tools` (the tools enabled on the instance) and
+  `gateway.callTool(name, input, { caller, requestId })`. Names are accepted
+  with or without the `productive_` prefix. Input (`GatewayJsonObject`) is
+  validated with the tool's strict zod schema before anything is sent, and
+  unknown fields are refused. The audit records of the call hold `caller`
+  only as an HMAC pseudonym (a per-process key), the input only as a SHA-256
+  hash, and a request id of the server's own, the same for every record of
+  the call; the host's `requestId` is not written. An error is recorded as a
+  fixed code (`http_<status>`, `timeout`, `network` or `error`), never as its
+  message.
+- `productiveGatewayTools`: the definitions (`name` without prefix, `title`,
+  `description`, `riskLevel`, `enabledByDefault`, `inputSchema` as JSON
+  Schema derived from the zod schema the call is validated with).
+- `productiveToolCatalog`: the same tools, deeply frozen, with `upstream`
+  (method and path template of every Productive request the tool may make)
+  and `broad` (false for every tool: each reads a fixed resource). Hosts can
+  build their own permission model from it without creating an instance.
+- `GatewayConfigError`, `PRODUCTIVE_DEFAULT_BASE_URL` and the types
+  (`ProductiveGatewayOptions`, `ProductiveGateway`, `InstancePolicy`,
+  `AuditSink`, `GatewayToolDefinition`, `GatewayToolCatalogEntry`,
+  `GatewayUpstreamOperation`, `GatewayToolResult`, `GatewayCallContext` and
+  the JSON types).
+
+| Tool | Risk | Input | Productive requests |
+|---|---|---|---|
+| `search_capabilities` | read | `query`, `limit?` | none |
+| `check_connection` | read | none | `GET /users`, `GET /organizations` |
+| `list_projects` | read | `query?`, `archived?`, `companyId?`, `page?`, `pageSize?` | `GET /projects` |
+| `get_project` | read | `projectId` | `GET /projects/{projectId}` |
+| `list_tasks` | read | `projectId?`, `assigneeId?`, `open?`, `query?`, `page?`, `pageSize?` | `GET /tasks` |
+| `get_task` | read | `taskId` | `GET /tasks/{taskId}`, `GET /comments` |
+| `list_people` | read | `query?`, `page?`, `pageSize?` | `GET /people` |
+| `list_companies` | read | `query?`, `archived?`, `page?`, `pageSize?` | `GET /companies` |
+| `list_budgets` | read | `projectId?`, `companyId?`, `open?`, `page?`, `pageSize?` | `GET /deals` |
+| `get_budget` | read | `budgetId` | `GET /deals/{budgetId}` |
+| `list_services` | read | `budgetId?`, `projectId?`, `page?`, `pageSize?` | `GET /services` |
+| `list_time_entries` | read | `after`, `before`, `personId?`, `projectId?`, `serviceId?`, `taskId?`, `page?`, `pageSize?` | `GET /time_entries` |
+| `time_report` | read | `after`, `before`, `groupBy`, `projectId?`, `personId?`, `page?` | `GET /reports/time_reports` |
+| `create_task` | write | `projectId`, `taskListId?`, `title`, `description?`, `assigneeId?`, `dueDate?` | `GET /task_lists`, `POST /tasks` |
+| `update_task` | write | `taskId`, `title?`, `description?`, `assigneeId?`, `dueDate?`, `workflowStatusId?` | `PATCH /tasks/{taskId}` |
+| `add_comment` | write | `taskId`, `body` | `POST /comments` |
+| `track_time` | write | `personId`, `date`, `minutes?` or `hours?`, `taskId?`, `serviceId?`, `note?`, `billableMinutes?` | `GET /tasks/{taskId}`, `POST /time_entries` |
+
+Ids are strings of digits; dates are `YYYY-MM-DD`; a time read
+(`after`/`before`) spans at most one year. Every result is a fixed
+projection, not the record as Productive sends it: people are name, title,
+mail and active flag; `check_connection` names only the token owner and the
+instance's organization; budgets, services, time entries and reports leave
+out cost, profit, margin, revenue and price (they derive from salaries and
+rates). Time is in minutes; a budget's total and used amounts are in the
+currency's minor units. `track_time` needs `personId`: the gateway never
+guesses the person. Without `serviceId` the service is taken from the task.
+
+The gateway never deletes, never runs an action, never stages a change, and
+never writes a financial or administrative resource, whatever the policy: it
+has no tool that could, and the resource policy it hands the shared logic
+has financial, admin and delete writes off and allows only the resources
+above.
+
+**Instance policy.** With `policy: { enableWrites, disabledTools, audit }`
+the host decides the instance's policy: writes run only with
+`enableWrites: true`; disabled tools are left out of `tools` (and out of
+`search_capabilities`) and refused when called; audit records go to `audit`
+(none without it). `disabledTools` must name gateway tools. Each call writes
+a start record before anything is sent to Productive, and a sink that throws
+on it refuses the call. Without `policy` the instance has no writes, no
+disabled tools and no audit records. Every call runs in a call scope of its
+own (AsyncLocalStorage), so a call made from inside another instance's call
+never inherits its policy, sink, redactor or caller.
+
+**Results.** A successful result has `structuredContent` and one text block:
+a short English summary, a blank line, and the same data as compact JSON.
+The data is redacted twice against the instance's secrets before it is
+serialised: the API token (exact value, URL- and JSON-encoded forms and any
+piece of 6 characters or more, in strings, object keys and the string form
+of numbers) and the organization id (as a whole number in text, not inside
+a longer number, a date or a decimal). Credential-shaped text and
+credential-named fields are masked as well.
+
+**Errors.** An error result carries our own English text, never Productive's
+response body, message or request id, nor the request's address. An HTTP
+failure starts with `Productive API request failed with HTTP <status>.`,
+followed by our own hint for 400, 401 (`The API token was refused.`), 403,
+404, 422, 429 (with `Retry after N seconds.` when Productive sends a numeric
+`Retry-After`) and 5xx, so a host can map it by status. Other errors are
+`Invalid input for <tool>: …`, `Unsupported Productive gateway tool.`,
+`The tool <tool> is disabled on this instance.`,
+`The tool <tool> changes data, and writes are disabled on this instance.`,
+`The audit record could not be written, so the call was not run.`,
+`Productive API request timed out.`, `Network error calling the Productive API.`,
+`Productive sent an answer this server cannot read.` or a refusal of the
+input in our own words (for example `No budget with this id.`).
+
+**Credential admission and the sink check.** A gateway accepts only an API
+token of printable ASCII (0x21-0x7E) of at least 16 characters that shares
+no piece of 6 characters with a string literal in `src/`
+(`src/fixed-corpus.generated.ts`, kept up to date by a test), with the fixed
+fallbacks (`src/fallbacks.ts`) or with the tool list, and an organization id
+of digits only. A refused value throws `GatewayConfigError` when the gateway
+is created, before anything is built or sent; the refusal is a fixed text
+that holds no piece of the token, and every error a gateway throws has no
+`cause` and a `stack` of only `name: message`. As the very last step, every
+output (the tool list, each result as a whole, each audit record) is checked
+in its final form, and one that still holds a piece of the token is
+replaced by a fixed fallback. Residual risk: Productive echoing the token
+otherwise transformed (split into pieces shorter than 6 characters,
+reversed, hashed) is not recognised; such data reaches only the tenant whose
+token it is.
+
 ## Security model
 
 - With per-user authentication each caller acts with their own enrolled Productive token, so

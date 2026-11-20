@@ -1,12 +1,16 @@
 {
   "name": "mcp-server-productive",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "mcpName": "io.github.borgels/mcp-server-productive",
   "description": "Policy-aware MCP server for the Productive.io API v2 (JSON:API) — projects, tasks, time, resourcing, financials, CRM and reports.",
   "type": "module",
   "main": "./dist/stdio.js",
   "exports": {
-    ".": "./dist/stdio.js"
+    ".": "./dist/stdio.js",
+    "./gateway": {
+      "types": "./dist/gateway.d.ts",
+      "default": "./dist/gateway.js"
+    }
   },
   "files": [
     "dist",
@@ -19,12 +23,13 @@
     "mcp-server-productive": "./dist/stdio.js"
   },
   "scripts": {
-    "build": "tsup src/transports/stdio.ts src/transports/http.ts --format esm --dts --clean --sourcemap",
+    "build": "tsup --entry.stdio src/transports/stdio.ts --entry.http src/transports/http.ts --entry.gateway src/gateway.ts --format esm --dts --clean --sourcemap",
     "dev": "tsx src/transports/stdio.ts",
     "dev:http": "tsx src/transports/http.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "registry:generate": "node scripts/generate-registry.mjs",
+    "registry:generate": "node scripts/generate-registry.mjs && node scripts/fixed-corpus.mjs",
+    "corpus:generate": "node scripts/fixed-corpus.mjs",
     "prepare": "npm run build",
     "prepack": "npm run typecheck && npm test && npm run build",
     "smoke:live": "tsx test/live-smoke.ts"

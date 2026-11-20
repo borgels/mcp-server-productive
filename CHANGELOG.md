@@ -2,7 +2,34 @@
 
 ## Unreleased
 
+## 0.4.0
+
+### Embedding (`./gateway`)
+
+- New package export `mcp-server-productive/gateway` in the shape of `mcp-server-template`:
+  `createProductiveGateway({ apiToken, organizationId, baseUrl?, fetchImpl?, timeoutMs?, policy? })`,
+  `productiveGatewayTools` and the deeply frozen `productiveToolCatalog` (with `upstream` and
+  `broad`). See README, "Embedding".
+- Credentials only from the host: the gateway reads no `PRODUCTIVE_*` variable. The token passes key
+  admission (printable ASCII, 16 characters or more, no piece shared with our own texts); the
+  organization id must be digits.
+- Host policy (`enableWrites`, `disabledTools`, `audit`), with no writes, no disabled tools and no
+  audit by default. Every call runs in its own call scope; audit records carry the caller as an HMAC
+  pseudonym, and the start record is written before anything is sent.
+- Narrow tools only: reads of projects, tasks (with comments), people, companies, budgets, services,
+  time entries and time reports, and four writes (`create_task`, `update_task`, `add_comment`,
+  `track_time`). No delete, action, prepare/commit, per-user auth or financial/admin write is
+  reachable through the gateway. Results are fixed projections without salary-derived figures.
+- Results are redacted twice per instance (token and organization id) and sink-checked; errors are
+  our own text, starting with `Productive API request failed with HTTP <status>`.
+
+### Other changes
+
 - Published to npm and the MCP Registry from tagged releases.
+- `ProductiveClient` takes `fromEnvironment: false` (used by the gateway); the MCP server is unchanged.
+  A redirect is thrown as `ProductiveRedirectError`.
+- The build names its entries, so `dist/stdio.js` and `dist/http.js` stay where they were, next to
+  the new `dist/gateway.js`.
 
 ## 0.3.0
 
