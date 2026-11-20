@@ -2,7 +2,7 @@ import { ConfigError, readEnvInteger } from '../config-env.js';
 import { ProductiveHttpError, redactUrl, registerSecret } from '../errors.js';
 import type { HttpMethod } from './registry-types.js';
 
-const DEFAULT_BASE_URL = 'https://api.productive.io/api/v2';
+export const DEFAULT_BASE_URL = 'https://api.productive.io/api/v2';
 
 /**
  * JSON:API media type. Productive accepts it on requests and answers with it;
@@ -13,6 +13,8 @@ const JSON_API = 'application/vnd.api+json';
 /** Error responses are read up to this many bytes. */
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
 const MAX_TIMEOUT_MS = 10 * 60 * 1000;
+/** Time limit per request when neither the options nor (for the MCP server) PRODUCTIVE_TIMEOUT_MS give one. */
+const DEFAULT_TIMEOUT_MS = 30_000;
 
 /** Productive caps a page at 200 records and silently clamps anything larger. */
 export const MAX_PAGE_SIZE = 200;
@@ -35,6 +37,13 @@ export interface ProductiveClientOptions {
   baseUrl?: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /**
+   * Read missing values from the PRODUCTIVE_* environment and register the
+   * token with the process-wide error redaction. Default true (the MCP
+   * server). The embeddable gateway passes false: its instances use only what
+   * the host gives them and redact with their own redactor.
+   */
+  fromEnvironment?: boolean;
 }
 
 export interface ProductiveRequestOptions {
@@ -83,16 +92,22 @@ export class ProductiveClient {
   private readonly timeoutMs: number;
 
 
+  private readonly fromEnvironment: boolean;
+
   constructor(options: ProductiveClientOptions = {}) {
-    this.apiToken = options.apiToken ?? process.env.PRODUCTIVE_API_TOKEN;
-    registerSecret(this.apiToken);
-    this.organizationId = options.organizationId ?? process.env.PRODUCTIVE_ORGANIZATION_ID;
+    const env = options.fromEnvironment !== false;
+    this.fromEnvironment = env;
+    this.apiToken = options.apiToken ?? (env ? process.env.PRODUCTIVE_API_TOKEN : undefined);
+    if (env) registerSecret(this.apiToken);
+    this.organizationId = options.organizationId ?? (env ? process.env.PRODUCTIVE_ORGANIZATION_ID : undefined);
     this.baseUrl = trimTrailingSlash(
-      options.baseUrl ?? process.env.PRODUCTIVE_BASE_URL ?? DEFAULT_BASE_URL,
+      options.baseUrl ?? (env ? process.env.PRODUCTIVE_BASE_URL : undefined) ?? DEFAULT_BASE_URL,
     );
     assertSafeBaseUrl(this.baseUrl);
     this.fetchImpl = options.fetchImpl ?? fetch;
-    this.timeoutMs = options.timeoutMs ?? readEnvInteger('PRODUCTIVE_TIMEOUT_MS', 30_000, { max: MAX_TIMEOUT_MS });
+    this.timeoutMs =
+      options.timeoutMs ??
+      (env ? readEnvInteger('PRODUCTIVE_TIMEOUT_MS', 30_000, { max: MAX_TIMEOUT_MS }) : DEFAULT_TIMEOUT_MS);
     if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs < 1) {
       throw new ConfigError('timeoutMs must be a positive integer.');
     }
@@ -118,6 +133,7 @@ export class ProductiveClient {
       baseUrl: this.baseUrl,
       fetchImpl: this.fetchImpl,
       timeoutMs: this.timeoutMs,
+      fromEnvironment: this.fromEnvironment,
     });
   }
 
@@ -153,10 +169,13 @@ export class ProductiveClient {
 
     if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
       void response.body?.cancel().catch(() => undefined);
-      throw new Error(
+      const redirect = new Error(
         `Productive API responded with a redirect (HTTP ${response.status}) for ${method} ${redactUrl(url)}; ` +
           'redirects are not followed. Check PRODUCTIVE_BASE_URL.',
       );
+      redirect.name = 'ProductiveRedirectError';
+      Object.defineProperty(redirect, 'status', { value: response.status, enumerable: false });
+      throw redirect;
     }
 
     if (!response.ok) {

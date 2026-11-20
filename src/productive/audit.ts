@@ -1,5 +1,6 @@
 import { appendFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { currentInstancePolicy } from './scope.js';
 
 export interface AuditEvent {
   tool: string;
@@ -31,6 +32,9 @@ export interface AuditEvent {
  * operation, which is enough to tie a line back to a prepared change.
  */
 export async function writeAuditEvent(event: AuditEvent): Promise<void> {
+  // Inside an embedded gateway call the gateway writes its own records, to the host's sink (src/gateway.ts), and
+  // PRODUCTIVE_AUDIT_LOG is not read.
+  if (currentInstancePolicy()) return;
   const auditPath = process.env.PRODUCTIVE_AUDIT_LOG;
   if (!auditPath) return;
 
