@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.5.0
+
+### Embedding (`./gateway`)
+
+- Gateway error results carry failure metadata: when Productive answered with an HTTP error (or a
+  redirect, which is not followed), the
+  result has `failure: { httpStatus, requestId? }`, so a host can count failures by status without
+  reading their text. `requestId` is Productive's own id from a response header
+  (`REQUEST_ID_HEADERS`, `x-request-id` first), kept only when it is a hex id of 8 to 64 characters
+  (one run of hex digits, or groups of four or more joined by single hyphens, as in a UUID) and does
+  not hold the shape of a personal number. It is checked again after redaction, so an id that shared
+  a piece with the token is dropped. Never the body, Productive's error code or message. The helpers
+  are in `src/errors.ts` (`vendorRequestId`, `requestIdFrom`, `failureMetadata`).
+
 ## 0.4.0
 
 ### Embedding (`./gateway`)

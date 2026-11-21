@@ -9,6 +9,7 @@ import {
   type GatewayToolSpec,
   type GatewayUpstreamOperation,
 } from './gateway-tools.js';
+import { failureMetadata, vendorRequestId, type FailureMetadata } from './errors.js';
 import { admitsKey, KEY_REFUSED, leaksSecret, maskedText, sealedError } from './key-admission.js';
 import { DEFAULT_BASE_URL, ProductiveClient } from './productive/client.js';
 import type { ProductivePolicy } from './productive/policy.js';
@@ -81,10 +82,19 @@ export interface GatewayToolDefinition {
   inputSchema: GatewayJsonObject;
 }
 
+/**
+ * Metadata about a failed call, on an error result whose cause is known: the HTTP status Productive answered with,
+ * and its request id when a response header gives one as a UUID or hex id. For a host that counts failures without
+ * reading their text. Never the response body, Productive's error code or message, or the input.
+ */
+export type GatewayFailure = FailureMetadata;
+
 export interface GatewayToolResult {
   content: Array<{ type: 'text'; text: string }>;
   structuredContent?: GatewayJsonValue;
   isError?: boolean;
+  /** On an error result from Productive's API only: its HTTP status and request id (see GatewayFailure). */
+  failure?: GatewayFailure;
 }
 
 /** Who and which request a call belongs to; the caller is written to the audit records only as a pseudonym. */
@@ -343,8 +353,8 @@ function buildProductiveGateway(options: ProductiveGatewayOptions, credentials: 
         () =>
           runCall(toolName, input).then(result => {
             // A successful result is already redacted as data (twice) and its JSON text built from that data; an
-            // error result is our own text, redacted as a whole.
-            const final = result.isError ? (redactDeep(result, redactor) as GatewayToolResult) : result;
+            // error result is our own text, redacted as a whole, its failure metadata checked again after that.
+            const final = result.isError ? withFailureInForm(redactDeep(result, redactor) as GatewayToolResult) : result;
             // The sink check, as the very last step: a result that holds a piece of the token anywhere, outer
             // fields and the JSON text included, is withheld whole.
             return leaksSecret(final, redactor) ? withheldResult() : final;
@@ -388,7 +398,7 @@ function buildProductiveGateway(options: ProductiveGatewayOptions, credentials: 
       data = await tool.handler(target, { client, policy: resourcePolicy, offered });
     } catch (error) {
       await auditQuietly({ tool: name, action: 'error', target, error });
-      return errorResult(gatewayErrorText(error));
+      return errorResult(gatewayErrorText(error), failureMetadata(error));
     }
     await auditQuietly({ tool: name, action: 'finish', target, status: 'ok' });
     // Twice: the second pass, the last step, also covers what the first inserted (the depth placeholder).
@@ -539,9 +549,23 @@ function jsonResult(text: string, structuredContent: unknown): GatewayToolResult
   };
 }
 
-function errorResult(text: string): GatewayToolResult {
+function errorResult(text: string, failure?: GatewayFailure): GatewayToolResult {
   return {
     isError: true,
     content: [{ type: 'text', text }],
+    ...(failure ? { failure } : {}),
   };
+}
+
+/**
+ * The failure metadata as it must be after redaction: on an error result only, a status of 100-599 and a request id
+ * still in the form of one (redaction can have changed it). Anything else is dropped, never passed on.
+ */
+function withFailureInForm(result: GatewayToolResult): GatewayToolResult {
+  const { failure, ...rest } = result;
+  if (!result.isError || failure === undefined || failure === null || typeof failure !== 'object') return rest;
+  const status = failure.httpStatus;
+  if (typeof status !== 'number' || !Number.isInteger(status) || status < 100 || status > 599) return rest;
+  const requestId = vendorRequestId(failure.requestId);
+  return { ...rest, failure: requestId === undefined ? { httpStatus: status } : { httpStatus: status, requestId } };
 }
