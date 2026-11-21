@@ -364,7 +364,7 @@ of numbers) and the organization id (as a whole number in text, not inside
 a longer number, a date or a decimal). Credential-shaped text and
 credential-named fields are masked as well.
 
-**Errors.** An error result carries our own English text, never Productive's
+**Errors.** The text of an error result is our own English, never Productive's
 response body, message or request id, nor the request's address. An HTTP
 failure starts with `Productive API request failed with HTTP <status>.`,
 followed by our own hint for 400, 401 (`The API token was refused.`), 403,
@@ -377,6 +377,16 @@ followed by our own hint for 400, 401 (`The API token was refused.`), 403,
 `Productive API request timed out.`, `Network error calling the Productive API.`,
 `Productive sent an answer this server cannot read.` or a refusal of the
 input in our own words (for example `No budget with this id.`).
+
+**Failure metadata.** When Productive answered with an HTTP error, the error
+result also has `failure: { httpStatus, requestId? }`: the status, and
+Productive's request id from a response header (`REQUEST_ID_HEADERS` in
+`src/errors.ts`, `x-request-id` first) only when it is a hex id of 8 to 64
+characters (one run of hex digits, or groups of four or more joined by single
+hyphens, as in a UUID) and does not hold the shape of a personal number. It is
+checked again after redaction. A host can count failures from it without
+reading their text. Never the response body, Productive's error code or
+message.
 
 **Credential admission and the sink check.** A gateway accepts only an API
 token of printable ASCII (0x21-0x7E) of at least 16 characters that shares

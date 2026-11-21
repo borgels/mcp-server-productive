@@ -1,5 +1,5 @@
 import { ConfigError, readEnvInteger } from '../config-env.js';
-import { ProductiveHttpError, redactUrl, registerSecret } from '../errors.js';
+import { ProductiveHttpError, redactUrl, registerSecret, requestIdFrom } from '../errors.js';
 import type { HttpMethod } from './registry-types.js';
 
 export const DEFAULT_BASE_URL = 'https://api.productive.io/api/v2';
@@ -186,6 +186,7 @@ export class ProductiveClient {
         url,
         payload,
         requestId: response.headers.get('x-request-id') ?? undefined,
+        failureRequestId: requestIdFrom(response.headers),
         retryAfter: response.headers.get('retry-after') ?? undefined,
       });
     }

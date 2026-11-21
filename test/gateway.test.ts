@@ -507,7 +507,7 @@ describe('errors', () => {
     for (const [status, text] of expected) {
       const audit = sink();
       const result = await gateway(failing(status), { policy: { audit: audit.audit } }).callTool('get_project', { projectId: '701' });
-      expect(result).toEqual({ isError: true, content: [{ type: 'text', text }] });
+      expect(result).toEqual({ isError: true, content: [{ type: 'text', text }], failure: { httpStatus: status } });
       expect(audit.records.at(-1)).toMatchObject({ action: 'error', error: `http_${status}` });
       expect(JSON.stringify(audit.records)).not.toMatch(/Leak me|secret_code|req-abc/);
     }
