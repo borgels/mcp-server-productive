@@ -1824,6 +1824,7 @@ export const FIXED_CORPUS: readonly string[] = [
   "facility_costs",
   "facility_costs_breakdown",
   "facility_overhead_cost",
+  "failureRequestId",
   "favorite_filter",
   "fields",
   "file_updated_at",

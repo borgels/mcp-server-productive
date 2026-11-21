@@ -175,11 +175,14 @@ export class ProductiveClient {
       );
       redirect.name = 'ProductiveRedirectError';
       Object.defineProperty(redirect, 'status', { value: response.status, enumerable: false });
+      Object.defineProperty(redirect, 'failureRequestId', { value: requestIdFrom(response.headers), enumerable: false });
       throw redirect;
     }
 
     if (!response.ok) {
-      const payload = await readErrorBody(response);
+      // The status and headers are known: a body that cannot be read (a broken stream, a timeout) leaves the
+      // payload empty, so the error is still the HTTP error with its status and request id.
+      const payload = await readErrorBody(response).catch(() => undefined);
       throw new ProductiveHttpError({
         status: response.status,
         method,

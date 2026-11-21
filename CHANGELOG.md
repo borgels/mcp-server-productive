@@ -6,7 +6,8 @@
 
 ### Embedding (`./gateway`)
 
-- Gateway error results carry failure metadata: when Productive answered with an HTTP error, the
+- Gateway error results carry failure metadata: when Productive answered with an HTTP error (or a
+  redirect, which is not followed), the
   result has `failure: { httpStatus, requestId? }`, so a host can count failures by status without
   reading their text. `requestId` is Productive's own id from a response header
   (`REQUEST_ID_HEADERS`, `x-request-id` first), kept only when it is a hex id of 8 to 64 characters

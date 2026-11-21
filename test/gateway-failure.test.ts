@@ -77,6 +77,31 @@ describe('gateway error results', () => {
     expect(serialised).not.toContain('Leak me');
   });
 
+  it('carry the status and request id of a refused redirect', async () => {
+    const fake = fakeProductive(
+      () => new Response(null, { status: 302, headers: { location: 'https://elsewhere.example.test/', 'x-request-id': UUID } }),
+    );
+    const gw = createProductiveGateway({ apiToken: TOKEN_A, organizationId: ORG_A, baseUrl: BASE, fetchImpl: fake.fetchImpl });
+    const result = await gw.callTool('get_project', { projectId: '701' });
+    expect(result.isError).toBe(true);
+    expect(result.failure).toEqual({ httpStatus: 302, requestId: UUID });
+    expect(JSON.stringify(result)).not.toContain('elsewhere');
+  });
+
+  it('keep the status and request id when the error body cannot be read', async () => {
+    const broken = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new TypeError('stream broke'));
+      },
+    });
+    const fake = fakeProductive(() => new Response(broken, { status: 503, headers: { 'x-request-id': UUID } }));
+    const gw = createProductiveGateway({ apiToken: TOKEN_A, organizationId: ORG_A, baseUrl: BASE, fetchImpl: fake.fetchImpl });
+    const result = await gw.callTool('get_project', { projectId: '701' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toBe('Productive API request failed with HTTP 503. Productive had an error; try again later.');
+    expect(result.failure).toEqual({ httpStatus: 503, requestId: UUID });
+  });
+
   it('carry the status alone when the request id is not in the form of one', async () => {
     const result = await gatewayAnswering(422, { 'x-request-id': 'Jane Doe <jane@example.com>' }).callTool('get_project', {
       projectId: '701',

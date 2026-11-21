@@ -378,7 +378,8 @@ followed by our own hint for 400, 401 (`The API token was refused.`), 403,
 `Productive sent an answer this server cannot read.` or a refusal of the
 input in our own words (for example `No budget with this id.`).
 
-**Failure metadata.** When Productive answered with an HTTP error, the error
+**Failure metadata.** When Productive answered with an HTTP error (or a redirect,
+which is not followed), the error
 result also has `failure: { httpStatus, requestId? }`: the status, and
 Productive's request id from a response header (`REQUEST_ID_HEADERS` in
 `src/errors.ts`, `x-request-id` first) only when it is a hex id of 8 to 64

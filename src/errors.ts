@@ -139,12 +139,16 @@ export interface FailureMetadata {
   requestId?: string;
 }
 
-/** The failure metadata of an error: an HTTP error from Productive gives its status and request id. */
+/**
+ * The failure metadata of an error: an HTTP error from Productive (a refused redirect included) gives its status and
+ * request id.
+ */
 export function failureMetadata(error: unknown): FailureMetadata | undefined {
-  if (!(error instanceof ProductiveHttpError)) return undefined;
-  const status = error.status;
-  if (!Number.isInteger(status) || status < 100 || status > 599) return undefined;
-  const requestId = vendorRequestId(error.failureRequestId);
+  const isRedirect = error instanceof Error && error.name === 'ProductiveRedirectError';
+  if (!(error instanceof ProductiveHttpError) && !isRedirect) return undefined;
+  const { status, failureRequestId } = error as { status?: unknown; failureRequestId?: unknown };
+  if (typeof status !== 'number' || !Number.isInteger(status) || status < 100 || status > 599) return undefined;
+  const requestId = typeof failureRequestId === 'string' ? vendorRequestId(failureRequestId) : undefined;
   return requestId === undefined ? { httpStatus: status } : { httpStatus: status, requestId };
 }
 
