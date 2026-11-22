@@ -93,7 +93,10 @@ export function defaultAnswer(request: RecordedRequest, organizationId = ORG_A):
       case path === '/services':
         return list([{ id: '555', type: 'services', attributes: { name: 'Montage', time_tracking_enabled: true, price: 100 } }]);
       case path === '/time_entries':
-        return list([{ id: '71', type: 'time_entries', attributes: { date: '2026-11-18', time: 120, billable_time: 60, note: 'Montage', cost: 500 } }]);
+        return list(
+          [{ id: '71', type: 'time_entries', attributes: { date: '2026-11-18', time: 120, billable_time: 60, note: 'Montage', cost: 500 }, relationships: { person: { data: { id: '11', type: 'people' } } } }],
+          [person('11', 'Bo', 'Berg')],
+        );
       case path === '/reports/time_reports':
         return list([{ id: 'r1', type: 'time_reports', attributes: { count: 3, worked_time: 300, billable_time: 240, cost: 9, revenue: 10 }, relationships: { person: { data: { id: '11', type: 'people' } } } }], [person('11', 'Bo', 'Berg')]);
       case path === '/task_lists':

@@ -16,6 +16,7 @@ import { DEFAULT_BASE_URL, ProductiveClient } from './productive/client.js';
 import type { ProductivePolicy } from './productive/policy.js';
 import {
   canonicalToolName,
+  currentActAs,
   currentCallContext,
   currentInstancePolicy,
   currentRedactor,
@@ -153,6 +154,11 @@ export interface GatewayToolCatalogEntry {
    * broad tool only to roles that may read everything. No gateway tool is broad.
    */
   readonly broad: boolean;
+  /**
+   * True for a self tool: it works only on the Productive person of the person in `actAs` (found by email) and is
+   * refused without one (`actAsRefused: 'invalid'`). False for every other tool.
+   */
+  readonly self: boolean;
 }
 
 export interface ProductiveGatewayOptions {
@@ -226,6 +232,7 @@ export const productiveToolCatalog: readonly GatewayToolCatalogEntry[] = deepFre
     ...definition(tool),
     upstream: tool.upstream.map(operation => ({ ...operation })),
     broad: tool.broad === true,
+    self: tool.self === true,
   })),
 );
 
@@ -415,6 +422,11 @@ function buildProductiveGateway(options: ProductiveGatewayOptions, credentials: 
     if (tool.riskLevel !== 'read' && !policy.enableWrites) {
       await auditQuietly({ tool: name, action: 'policy_denied', reason: 'writes disabled' });
       return errorResult(`The tool ${tool.name} changes data, and writes are disabled on this instance.`);
+    }
+
+    if (tool.self === true && !currentActAs()) {
+      await auditQuietly({ tool: name, action: 'rejected', reason: 'no person to act as' });
+      return actAsRefused('invalid');
     }
 
     const parsed = tool.input.safeParse(input ?? {});

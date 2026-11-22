@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.0 (2026-11-22)
+
+### Embedding (`./gateway`)
+
+- New self tool `list_my_time_entries`: the time entries of the person the
+  host names in `actAs`, in a period of at most one year, optionally by
+  project or task. The person is found as for a change (`GET /people` by
+  email, the whole result read) and the list is filtered on their
+  `person_id`, never on an id from the input. Without `actAs` it is refused
+  with `actAsRefused: 'invalid'` before anything is sent; no single person
+  gives `no_user`; an answer that holds an entry of anyone else is withheld.
+- The catalog has a `self` mark on every entry (true only for
+  `list_my_time_entries`), as the Intempus, Personio and Planday servers do.
+
 ## 0.7.0 (2026-11-22)
 
 ### Embedding (`./gateway`)

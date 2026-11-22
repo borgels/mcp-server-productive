@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ACT_AS_TEXTS, createProductiveGateway, productiveToolCatalog, type GatewayJsonObject } from '../src/gateway.js';
-import { PERSON_MISMATCH } from '../src/gateway-tools.js';
+import { NOT_OWN_TIME, PERSON_MISMATCH } from '../src/gateway-tools.js';
 import { LOOKUP_FAILED, LOOKUP_LIMIT } from '../src/productive/act-as-person.js';
 import { BASE, defaultAnswer, fakeProductive, jsonApi, ORG_A, sink, TOKEN_A, type RecordedRequest } from './gateway-helpers.js';
 
@@ -191,6 +191,68 @@ describe('acting as a person (actAs)', () => {
     const result = await writer(fake).callTool('track_time', { ...TRACK, personId: '11' });
     expect(result.isError).toBeUndefined();
     expect(fake.requests.map(request => request.path)).not.toContain('/people');
+  });
+
+  it('lists only the person own time: found by email, filtered on their person id', async () => {
+    const entry = (person: string) => ({
+      id: `7${person}`,
+      type: 'time_entries',
+      attributes: { date: '2026-11-18', time: 120, note: 'Montage', cost: 500 },
+      relationships: { person: { data: { id: person, type: 'people' } } },
+    });
+    const fakeAll = fakeProductive(request =>
+      request.path === '/people' ? people([MIA]) : request.path === '/time_entries' ? jsonApi({ data: [entry('42')], included: [MIA], meta: { total_count: 1 } }) : defaultAnswer(request),
+    );
+    const result = await writer(fakeAll).callTool('list_my_time_entries', { after: '2026-11-01', before: '2026-11-30', projectId: '701' }, { actAs: PERSON });
+    expect(result.isError).toBeUndefined();
+    expect(fakeAll.requests.map(request => `${request.method} ${request.path}`)).toEqual(['GET /people', 'GET /time_entries']);
+    const read = fakeAll.requests[1]!;
+    expect(read.query.get('filter[person_id]')).toBe('42');
+    expect(read.query.get('filter[project_id]')).toBe('701');
+    const entries = (result.structuredContent as { timeEntries: Array<{ person: { id: string }; cost?: unknown }> }).timeEntries;
+    expect(entries.map(e => e.person.id)).toEqual(['42']);
+    expect(JSON.stringify(result)).not.toContain('500');
+    // No personId in the input: the person is never chosen by the caller.
+    const other = await writer(fakeProductive()).callTool('list_my_time_entries', { after: '2026-11-01', before: '2026-11-30', personId: '11' }, { actAs: PERSON });
+    expect(other.isError).toBe(true);
+  });
+
+  it('shows nothing when Productive answers with time of another person', async () => {
+    const fake = fakeProductive(request =>
+      request.path === '/people'
+        ? people([MIA])
+        : request.path === '/time_entries'
+          ? jsonApi({
+              data: [
+                { id: '71', type: 'time_entries', attributes: { date: '2026-11-18', time: 60 }, relationships: { person: { data: { id: '42', type: 'people' } } } },
+                { id: '72', type: 'time_entries', attributes: { date: '2026-11-18', time: 60 }, relationships: { person: { data: { id: '11', type: 'people' } } } },
+              ],
+              meta: { total_count: 2 },
+            })
+          : defaultAnswer(request),
+    );
+    const result = await writer(fake).callTool('list_my_time_entries', { after: '2026-11-01', before: '2026-11-30' }, { actAs: PERSON });
+    expect(result).toEqual({ isError: true, content: [{ type: 'text', text: NOT_OWN_TIME }] });
+  });
+
+  it('refuses the self tool without a person, and with no single person, before any time is read', async () => {
+    const none = fakeProductive();
+    const result = await writer(none).callTool('list_my_time_entries', { after: '2026-11-01', before: '2026-11-30' });
+    expect(result).toEqual({ isError: true, content: [{ type: 'text', text: ACT_AS_TEXTS.invalid }], actAsRefused: 'invalid' });
+    expect(none.requests).toHaveLength(0);
+    const nobody = withPeople(people([]));
+    const refused = await writer(nobody).callTool('list_my_time_entries', { after: '2026-11-01', before: '2026-11-30' }, { actAs: PERSON });
+    expect(refused).toMatchObject({ isError: true, actAsRefused: 'no_user' });
+    expect(nobody.requests.map(request => request.path)).toEqual(['/people']);
+  });
+
+  it('marks only list_my_time_entries as a self tool, with the lookup first', () => {
+    expect(productiveToolCatalog.filter(entry => entry.self).map(entry => entry.name)).toEqual(['list_my_time_entries']);
+    expect(productiveToolCatalog.find(entry => entry.name === 'list_my_time_entries')?.upstream).toEqual([
+      { method: 'GET', path: '/people' },
+      { method: 'GET', path: '/time_entries' },
+    ]);
+    for (const entry of productiveToolCatalog) expect(typeof entry.self, entry.name).toBe('boolean');
   });
 
   it('declares the lookup first in every write tool upstream', () => {
