@@ -284,16 +284,51 @@ The module exports:
   variable at all: not the credentials, the base URL, the timeout, nor any
   policy, per-user or audit variable. It has no per-user tokens, no caller
   header (`X-MCP-User`) and no prepare/commit step: every call acts with the
-  instance's token in the instance's organization.
+  instance's token in the instance's organization. The only person a call can
+  be made for is the host's `actAs` (below).
+- **Acting as a person (`actAs`).** A host that verified the person a call is
+  made for passes `actAs: { email }` in the call context
+  (`gateway.callTool(name, input, { caller, actAs })`, `src/act-as.ts`, the
+  template's shared shape). Every **change** (the write tools) then first
+  finds exactly one active team member whose email is that address
+  (`GET /people?filter[email]=…&filter[person_type]=1` as the token's owner,
+  compared case-insensitively, the whole result read) and is made for them:
+  - `track_time` logs the time with their `person_id`. `personId` may be left
+    out; one that names anyone else is refused before anything is written
+    (time is logged only for the person).
+  - `create_task`, `update_task` and `add_comment` are made only when the
+    person exists. Productive's API has no writable author for them (a task's
+    and a comment's `creator` is read-only in its schema, and a token always
+    acts as its own user), so Productive's activity log and a comment's
+    creator show the token's owner, with or without `actAs`. This is not a
+    fallback: no other author can be sent. The host's own log names the
+    person, and the host's role for the person decides whether such a change
+    may be made at all.
+  - No such person, an inactive one, more than one, or a result that may be
+    cut short (a full page of 200, or a total above what was read): nothing
+    is sent, and the result is an error with `actAsRefused: 'no_user'`.
+  - Productive answering the lookup with 403 (the token may not see people):
+    `actAsRefused: 'not_permitted'`.
+  - A malformed `actAs` (`null` included): `actAsRefused: 'invalid'`, before
+    anything is sent.
+  - **Reads run as the token's owner**, with or without `actAs`: the host
+    decides who may read what.
+  - The server adds the email to no audit record, text or field of its own
+    (an audit error code is `act_as_<refusal>`). Productive's own data is
+    passed on as it is.
+
+  Without `actAs` every call runs as before, and `track_time` needs
+  `personId`. The token's user needs to see all team members and to log time
+  for others (in practice an administrator) for `actAs` to work for everyone.
 - `gateway.tools` (the tools enabled on the instance) and
-  `gateway.callTool(name, input, { caller, requestId })`. Names are accepted
+  `gateway.callTool(name, input, { caller, requestId, actAs })`. Names are accepted
   with or without the `productive_` prefix. Input (`GatewayJsonObject`) is
   validated with the tool's strict zod schema before anything is sent, and
   unknown fields are refused. The audit records of the call hold `caller`
   only as an HMAC pseudonym (a per-process key), the input only as a SHA-256
   hash, and a request id of the server's own, the same for every record of
   the call; the host's `requestId` is not written. An error is recorded as a
-  fixed code (`http_<status>`, `timeout`, `network` or `error`), never as its
+  fixed code (`http_<status>`, `timeout`, `act_as_<refusal>`, `network` or `error`), never as its
   message.
 - `productiveGatewayTools`: the definitions (`name` without prefix, `title`,
   `description`, `riskLevel`, `enabledByDefault`, `inputSchema` as JSON
