@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ACT_AS_TEXTS, createProductiveGateway, productiveToolCatalog, type GatewayJsonObject } from '../src/gateway.js';
 import { PERSON_MISMATCH } from '../src/gateway-tools.js';
-import { LOOKUP_LIMIT } from '../src/productive/act-as-person.js';
+import { LOOKUP_FAILED, LOOKUP_LIMIT } from '../src/productive/act-as-person.js';
 import { BASE, defaultAnswer, fakeProductive, jsonApi, ORG_A, sink, TOKEN_A, type RecordedRequest } from './gateway-helpers.js';
 
 const PERSON = { email: 'Mia.Lund@Example.test ', name: 'Mia Lund' };
@@ -138,6 +138,12 @@ describe('acting as a person (actAs)', () => {
         throw new TypeError('fetch failed for mia.lund@example.test');
       },
     ],
+    [
+      'a plain error with the address',
+      (request: RecordedRequest) => {
+        throw new Error(`Request failed: ${BASE}/people?filter%5Bemail%5D=${encodeURIComponent(request.query.get('filter[email]') ?? '')}`);
+      },
+    ],
   ])('keeps the email out of the result and the audit after %s', async (_label, answer) => {
     const audit = sink();
     const fake = withPeople(answer);
@@ -169,6 +175,15 @@ describe('acting as a person (actAs)', () => {
       .sort();
     expect(logged).toEqual(['11', '42']);
     expect((results[0]!.structuredContent as { timeEntry: { id: string } }).timeEntry).toBeDefined();
+  });
+
+  it('answers a plain lookup error with our own fixed text, and changes nothing', async () => {
+    const fake = withPeople(() => {
+      throw new Error('Request failed: mia.lund@example.test');
+    });
+    const result = await writer(fake).callTool('track_time', TRACK, { actAs: PERSON });
+    expect(result).toEqual({ isError: true, content: [{ type: 'text', text: LOOKUP_FAILED }] });
+    expect(fake.requests.map(request => request.method)).toEqual(['GET']);
   });
 
   it('runs as before without actAs: personId is then required', async () => {

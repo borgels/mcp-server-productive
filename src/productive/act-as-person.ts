@@ -10,6 +10,9 @@ import { currentActAs } from './scope.js';
  */
 export const LOOKUP_LIMIT = MAX_PAGE_SIZE;
 
+/** The text of a lookup that failed for another reason than Productive's answer: never the error's own message. */
+export const LOOKUP_FAILED = 'The person could not be looked up in Productive; nothing was changed.';
+
 /**
  * The Productive person a change is made for (gateway only). Without a person from the host (actAs), undefined: the
  * call runs as before. With one: the id of exactly one active team member (person_type 1, status 1) whose email is
@@ -35,7 +38,11 @@ export async function personForChange(client: ProductiveClient): Promise<string 
     if (error instanceof Error && error.name === 'ProductiveHttpError' && (error as { status?: unknown }).status === 403) {
       throw new ActAsRefusedError('not_permitted');
     }
-    throw error;
+    // Productive's own answers (an HTTP status, a refused redirect) and a timeout become fixed texts in the gateway. Any
+    // other error may carry the request's address, and with it the email: it is replaced by a fixed text of ours.
+    const name = error instanceof Error ? error.name : '';
+    if (['ProductiveHttpError', 'ProductiveRedirectError', 'TimeoutError', 'AbortError'].includes(name)) throw error;
+    throw new Error(LOOKUP_FAILED);
   }
   if (!response || typeof response !== 'object' || !Array.isArray((response as { data?: unknown }).data)) {
     throw new ActAsRefusedError('no_user');
