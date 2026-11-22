@@ -235,6 +235,52 @@ describe('acting as a person (actAs)', () => {
     expect(result).toEqual({ isError: true, content: [{ type: 'text', text: NOT_OWN_TIME }] });
   });
 
+  it.each([
+    ['an entry without a person', { id: '71', type: 'time_entries', attributes: { date: '2026-11-18', time: 60 } }],
+    ['an entry with a null person', { id: '71', type: 'time_entries', attributes: { date: '2026-11-18', time: 60 }, relationships: { person: { data: null } } }],
+  ])('shows nothing for %s', async (_label, entry) => {
+    const fake = fakeProductive(request =>
+      request.path === '/people' ? people([MIA]) : request.path === '/time_entries' ? jsonApi({ data: [entry], meta: { total_count: 1 } }) : defaultAnswer(request),
+    );
+    const result = await writer(fake).callTool('list_my_time_entries', { after: '2026-11-01', before: '2026-11-30' }, { actAs: PERSON });
+    expect(result).toEqual({ isError: true, content: [{ type: 'text', text: NOT_OWN_TIME }] });
+  });
+
+  it('reads no time when two people have the address', async () => {
+    const fake = withPeople(people([MIA, { ...MIA, id: '43' }]));
+    const result = await writer(fake).callTool('list_my_time_entries', { after: '2026-11-01', before: '2026-11-30' }, { actAs: PERSON });
+    expect(result).toMatchObject({ isError: true, actAsRefused: 'no_user' });
+    expect(fake.requests.map(request => request.path)).toEqual(['/people']);
+  });
+
+  it('keeps two people own time apart when their calls run at the same time', async () => {
+    const BO = { id: '11', type: 'people', attributes: { first_name: 'Bo', last_name: 'Berg', email: 'bo@example.test', status: 1 } };
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => (release = resolve));
+    const fake = fakeProductive(async request => {
+      if (request.path === '/people') {
+        await gate;
+        return people(request.query.get('filter[email]') === 'bo@example.test' ? [BO] : [MIA]);
+      }
+      const person = request.query.get('filter[person_id]') ?? '';
+      return jsonApi({
+        data: [{ id: `7${person}`, type: 'time_entries', attributes: { date: '2026-11-18', time: 60 }, relationships: { person: { data: { id: person, type: 'people' } } } }],
+        meta: { total_count: 1 },
+      });
+    });
+    const instance = writer(fake);
+    const both = Promise.all([
+      instance.callTool('list_my_time_entries', { after: '2026-11-01', before: '2026-11-30' }, { actAs: PERSON }),
+      instance.callTool('list_my_time_entries', { after: '2026-11-01', before: '2026-11-30' }, { actAs: { email: 'bo@example.test' } }),
+    ]);
+    for (let i = 0; i < 100 && fake.requests.length < 2; i += 1) await new Promise(resolve => setImmediate(resolve));
+    release();
+    const [mia, bo] = await both;
+    const ids = (result: typeof mia) => (result.structuredContent as { timeEntries: Array<{ person: { id: string } }> }).timeEntries.map(e => e.person.id);
+    expect(ids(mia)).toEqual(['42']);
+    expect(ids(bo)).toEqual(['11']);
+  });
+
   it('refuses the self tool without a person, and with no single person, before any time is read', async () => {
     const none = fakeProductive();
     const result = await writer(none).callTool('list_my_time_entries', { after: '2026-11-01', before: '2026-11-30' });

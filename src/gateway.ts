@@ -63,8 +63,10 @@ import { redactDeep, SecretRedactor } from './redaction.js';
  * No such person, or more than one: nothing is sent, and the result has
  * `actAsRefused: 'no_user'`. Productive refusing the lookup (403):
  * `actAsRefused: 'not_permitted'`. A malformed `actAs` refuses the call
- * (`invalid`). Reads run as the token's owner. The email is never written to
- * the audit or returned. The server's X-MCP-User resolution is never used.
+ * (`invalid`). Reads run as the token's owner, except the self tool
+ * `list_my_time_entries` (catalog `self: true`): it finds the person the same
+ * way, lists only their own time and is refused without `actAs`. The email is
+ * never written to the audit or returned. The server's X-MCP-User resolution is never used.
  *
  * Every call runs in a call scope of its own (AsyncLocalStorage), so a call
  * made from inside another instance's call (from its audit sink or its fetch)
