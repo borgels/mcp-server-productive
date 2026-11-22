@@ -9,6 +9,7 @@ import {
   type GatewayToolSpec,
   type GatewayUpstreamOperation,
 } from './gateway-tools.js';
+import { ActAsRefusedError, actAsRefusalInForm, normaliseActAs, type ActAs, type ActAsRefusal } from './act-as.js';
 import { failureMetadata, vendorRequestId, type FailureMetadata } from './errors.js';
 import { admitsKey, KEY_REFUSED, leaksSecret, maskedText, sealedError } from './key-admission.js';
 import { DEFAULT_BASE_URL, ProductiveClient } from './productive/client.js';
@@ -51,6 +52,19 @@ import { redactDeep, SecretRedactor } from './redaction.js';
  * never writes a financial or administrative resource: it has no tool that
  * could.
  *
+ * Acting as a person: a host that verified the person a call is made for
+ * passes `actAs: { email }` in the call context. Every change (a write tool)
+ * then first finds exactly one active Productive team member with that email
+ * (`GET /people`, as the token's owner) and is made for them: a time entry gets
+ * their `person_id`, and a time entry for anyone else is refused. Productive
+ * has no author field for a task or a comment, so those still show the token's
+ * owner in Productive's activity log; they are only made when the person exists.
+ * No such person, or more than one: nothing is sent, and the result has
+ * `actAsRefused: 'no_user'`. Productive refusing the lookup (403):
+ * `actAsRefused: 'not_permitted'`. A malformed `actAs` refuses the call
+ * (`invalid`). Reads run as the token's owner. The email is never written to
+ * the audit or returned. The server's X-MCP-User resolution is never used.
+ *
  * Every call runs in a call scope of its own (AsyncLocalStorage), so a call
  * made from inside another instance's call (from its audit sink or its fetch)
  * never inherits that instance's policy, sink, redactor or caller.
@@ -59,6 +73,12 @@ import { redactDeep, SecretRedactor } from './redaction.js';
 export type { AuditSink, InstancePolicy } from './productive/scope.js';
 export type { GatewayRiskLevel, GatewayUpstreamOperation } from './gateway-tools.js';
 export { GatewayConfigError } from './productive/scope.js';
+export { ACT_AS_REFUSALS, ACT_AS_TEXTS } from './act-as.js';
+
+/** The person a call is made for (GatewayCallContext.actAs; see src/act-as.ts). */
+export type GatewayActAs = ActAs;
+/** Why a call was not made as the person: `invalid` actAs, `no_user` in Productive, or the token is `not_permitted` to. */
+export type GatewayActAsRefusal = ActAsRefusal;
 
 /** Productive's API address, used when the host gives no `baseUrl`. */
 export const PRODUCTIVE_DEFAULT_BASE_URL = DEFAULT_BASE_URL;
@@ -95,9 +115,17 @@ export interface GatewayToolResult {
   isError?: boolean;
   /** On an error result from Productive's API only: its HTTP status and request id (see GatewayFailure). */
   failure?: GatewayFailure;
+  /**
+   * On an error result only: the change was not sent, because it could not be made for the person in `actAs`. The text
+   * is fixed and never holds the email.
+   */
+  actAsRefused?: GatewayActAsRefusal;
 }
 
-/** Who and which request a call belongs to; the caller is written to the audit records only as a pseudonym. */
+/**
+ * Who and which request a call belongs to, and the person to act as. The caller is written to the audit records only
+ * as a pseudonym; the person to act as never.
+ */
 export type GatewayCallContext = CallContext;
 
 /** Deeply read-only JSON, as found in the frozen tool catalog. */
@@ -340,9 +368,18 @@ function buildProductiveGateway(options: ProductiveGatewayOptions, credentials: 
     /** Tools enabled on this instance (tools the host's policy disables are left out). */
     tools: productiveGatewayTools.filter(tool => offeredTools.has(`${TOOL_PREFIX}${tool.name}`)),
     callTool(toolName: string, input: GatewayJsonObject = {}, context?: GatewayCallContext): Promise<GatewayToolResult> {
+      // The person to act as, checked before anything else: a malformed one refuses the call, so a change is never made
+      // for the token's owner by mistake.
+      let actAs: Readonly<ActAs> | undefined;
+      try {
+        actAs = normaliseActAs(context?.actAs);
+      } catch {
+        return Promise.resolve(actAsRefused('invalid'));
+      }
       // Every call in a scope of its own.
       return runInCallScope(
         {
+          ...(actAs ? { actAs } : {}),
           policy,
           redactor,
           caller: contextValue(context?.caller, redactor),
@@ -398,6 +435,7 @@ function buildProductiveGateway(options: ProductiveGatewayOptions, credentials: 
       data = await tool.handler(target, { client, policy: resourcePolicy, offered });
     } catch (error) {
       await auditQuietly({ tool: name, action: 'error', target, error });
+      if (error instanceof ActAsRefusedError) return actAsRefused(error.refusal);
       return errorResult(gatewayErrorText(error), failureMetadata(error));
     }
     await auditQuietly({ tool: name, action: 'finish', target, status: 'ok' });
@@ -479,7 +517,8 @@ export function callerPseudonym(caller: string | undefined): string | undefined 
 }
 
 /**
- * The audit's code for an error: `http_<status>` for a Productive answer, `timeout`, `network`, or `error`. Only
+ * The audit's code for an error: `http_<status>` for a Productive answer, `timeout`, `act_as_<refusal>`, `network`, or
+ * `error`. Only
  * codes from this fixed set are written; the error's message never is.
  */
 function auditErrorCode(error: unknown): string {
@@ -489,6 +528,7 @@ function auditErrorCode(error: unknown): string {
     return `http_${status}`;
   }
   if (name === 'TimeoutError' || name === 'AbortError') return 'timeout';
+  if (error instanceof ActAsRefusedError) return `act_as_${error.refusal}`;
   if (error instanceof TypeError) return 'network';
   return 'error';
 }
@@ -549,6 +589,11 @@ function jsonResult(text: string, structuredContent: unknown): GatewayToolResult
   };
 }
 
+/** A change not made for the person: our fixed text and the refusal, nothing else. */
+function actAsRefused(refusal: ActAsRefusal): GatewayToolResult {
+  return { ...errorResult(new ActAsRefusedError(refusal).message), actAsRefused: refusal };
+}
+
 function errorResult(text: string, failure?: GatewayFailure): GatewayToolResult {
   return {
     isError: true,
@@ -562,7 +607,10 @@ function errorResult(text: string, failure?: GatewayFailure): GatewayToolResult 
  * still in the form of one (redaction can have changed it). Anything else is dropped, never passed on.
  */
 function withFailureInForm(result: GatewayToolResult): GatewayToolResult {
-  const { failure, ...rest } = result;
+  const { failure, actAsRefused: refusal, ...withoutRefusal } = result;
+  // The refusal stays only on an error result, and only as one of ours.
+  const kept = result.isError ? actAsRefusalInForm(refusal) : undefined;
+  const rest: GatewayToolResult = kept ? { ...withoutRefusal, actAsRefused: kept } : withoutRefusal;
   if (!result.isError || failure === undefined || failure === null || typeof failure !== 'object') return rest;
   const status = failure.httpStatus;
   if (typeof status !== 'number' || !Number.isInteger(status) || status < 100 || status > 599) return rest;

@@ -1,6 +1,7 @@
 import { z } from 'zod/v4';
 import { MAX_PAGE_SIZE, type FilterValue, type ProductiveClient, type ProductiveResponse } from './productive/client.js';
 import { flattenCollection, flattenSingle, type FlatCollection, type FlatRecord } from './productive/jsonapi.js';
+import { personForChange } from './productive/act-as-person.js';
 import type { ProductivePolicy } from './productive/policy.js';
 import {
   createRecord,
@@ -68,6 +69,8 @@ export class GatewayInputError extends Error {
 const get = (path: string): GatewayUpstreamOperation => ({ method: 'GET', path });
 const post = (path: string): GatewayUpstreamOperation => ({ method: 'POST', path });
 const patch = (path: string): GatewayUpstreamOperation => ({ method: 'PATCH', path });
+/** A change made for the person in `actAs` first finds their Productive person (src/productive/act-as-person.ts). */
+const findPerson = get('/people');
 
 // ---------------------------------------------------------------------------
 // Input building blocks
@@ -349,6 +352,10 @@ async function one(context: GatewayToolContext, resource: string, recordId: stri
 const PROJECT_INCLUDE = ['company', 'project_manager'];
 const TASK_INCLUDE = ['project', 'task_list', 'assignee', 'workflow_status'];
 const BUDGET_INCLUDE = ['company', 'project', 'responsible'];
+
+/** A track_time for someone else while acting as a person: refused before anything is written. */
+export const PERSON_MISMATCH =
+  'Refused: acting as a person, time is logged only for that person; leave out personId. Nothing was changed.';
 
 /** Productive's status filter values: 1 is active or open, 2 archived or closed; no filter when not asked. */
 const openOrClosed = (open: unknown): number | undefined => (open === true ? 1 : open === false ? 2 : undefined);
@@ -706,7 +713,7 @@ export const GATEWAY_TOOLS: readonly GatewayToolSpec[] = [
       "Create a task in a project. Without taskListId it goes in the project's first open task list.",
     riskLevel: 'write',
     summary: 'Productive task created.',
-    upstream: [get('/task_lists'), post('/tasks')],
+    upstream: [findPerson, get('/task_lists'), post('/tasks')],
     resources: ['task_lists', 'tasks'],
     input: z.strictObject({
       projectId: id('project'),
@@ -717,6 +724,8 @@ export const GATEWAY_TOOLS: readonly GatewayToolSpec[] = [
       dueDate: isoDate('Due date').optional(),
     }),
     async handler(input, context) {
+      // With a person from the host: only when they are a person in Productive (no author field to set).
+      await personForChange(context.client);
       let taskListId = input.taskListId as string | undefined;
       if (!taskListId) {
         const lists = await list(context, 'task_lists', {
@@ -741,7 +750,7 @@ export const GATEWAY_TOOLS: readonly GatewayToolSpec[] = [
       'Change a task: title, description, assignee, due date or workflow status (a status in the closed category closes the task). Fields not given keep their values.',
     riskLevel: 'write',
     summary: 'Productive task updated.',
-    upstream: [patch('/tasks/{taskId}')],
+    upstream: [findPerson, patch('/tasks/{taskId}')],
     resources: ['tasks'],
     input: z.strictObject({
       taskId: id('task'),
@@ -759,6 +768,7 @@ export const GATEWAY_TOOLS: readonly GatewayToolSpec[] = [
       if (input.dueDate !== undefined) attributes.due_date = input.dueDate;
       if (input.workflowStatusId !== undefined) attributes.workflow_status_id = input.workflowStatusId;
       if (Object.keys(attributes).length === 0) throw new GatewayInputError('Give at least one field to change.');
+      await personForChange(context.client);
       const outcome = await updateRecord(
         context.client,
         { resource: 'tasks', id: String(input.taskId), attributes },
@@ -773,13 +783,14 @@ export const GATEWAY_TOOLS: readonly GatewayToolSpec[] = [
     description: 'Add a comment to a task.',
     riskLevel: 'write',
     summary: 'Productive comment added.',
-    upstream: [post('/comments')],
+    upstream: [findPerson, post('/comments')],
     resources: ['comments'],
     input: z.strictObject({
       taskId: id('task'),
       body: z.string().trim().min(1).max(20_000).describe('The comment text.'),
     }),
     async handler(input, context) {
+      await personForChange(context.client);
       const outcome = await createRecord(
         context.client,
         { resource: 'comments', attributes: { task_id: input.taskId, body: input.body } },
@@ -792,13 +803,15 @@ export const GATEWAY_TOOLS: readonly GatewayToolSpec[] = [
     name: 'track_time',
     title: 'Log time in Productive',
     description:
-      "Log time for a person on a date, in minutes or hours, against a service or a task (the task's service is used).",
+      "Log time for a person on a date, in minutes or hours, against a service or a task (the task's service is used). When the host acts as a person (actAs), the time is that person's and personId may be left out.",
     riskLevel: 'write',
     summary: 'Productive time logged.',
-    upstream: [get('/tasks/{taskId}'), post('/time_entries')],
+    upstream: [findPerson, get('/tasks/{taskId}'), post('/time_entries')],
     resources: ['tasks', 'time_entries'],
     input: z.strictObject({
-      personId: id('person the time is logged for (required: never guessed)'),
+      personId: id(
+        'person the time is logged for (required unless the host acts as a person: never guessed)',
+      ).optional(),
       date: isoDate('Day the time was worked'),
       minutes: z.number().int().min(1).max(1440).optional().describe('Time in minutes. Give minutes or hours.'),
       hours: z.number().min(0.01).max(24).optional().describe('Time in hours. Give minutes or hours.'),
@@ -814,10 +827,17 @@ export const GATEWAY_TOOLS: readonly GatewayToolSpec[] = [
       if (input.serviceId === undefined && input.taskId === undefined) {
         throw new GatewayInputError('Give serviceId, or a taskId to take the service from.');
       }
+      // With a person from the host, the time is theirs: found by their email, and never logged for anyone else.
+      const acting = await personForChange(context.client);
+      if (acting !== undefined && input.personId !== undefined && input.personId !== acting) {
+        throw new GatewayInputError(PERSON_MISMATCH);
+      }
+      const personId = acting ?? (input.personId as string | undefined);
+      if (personId === undefined) throw new GatewayInputError('Give personId: the person the time is logged for.');
       const outcome = await trackTime(
         context.client,
         {
-          personId: String(input.personId),
+          personId,
           date: String(input.date),
           minutes: input.minutes as number | undefined,
           hours: input.hours as number | undefined,

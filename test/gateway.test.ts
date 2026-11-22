@@ -323,7 +323,7 @@ describe('instance policy', () => {
     });
 
     const noPerson = await instance.callTool('track_time', { date: '2026-11-19', minutes: 30, serviceId: '555' });
-    expect(noPerson.content[0]?.text).toMatch(/^Invalid input for track_time:/);
+    expect(noPerson.content[0]?.text).toBe('Give personId: the person the time is logged for.');
     const both = await instance.callTool('track_time', { personId: '11', date: '2026-11-19', minutes: 30, hours: 1, serviceId: '555' });
     expect(both.content[0]?.text).toBe('Give either minutes or hours.');
     const nothing = await instance.callTool('update_task', { taskId: '9001' });

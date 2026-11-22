@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.7.0 (2026-11-22)
+
+### Embedding (`./gateway`)
+
+- Changes are made for the person the host names. A host passes
+  `actAs: { email }` (the template's shared shape, `src/act-as.ts`) in the
+  call context; every write tool then finds exactly one active team member
+  with that email (`GET /people` with `filter[email]` and
+  `filter[person_type]=1`, as the token's owner, the whole result read).
+  `track_time` logs the time with that person's `person_id` (`personId` is
+  now optional, and one naming someone else is refused); `create_task`,
+  `update_task` and `add_comment` run only when the person exists (Productive
+  has no author field, so its activity log still shows the token's owner).
+  No such person (or more than one, or a result that may be cut short):
+  nothing is sent, `actAsRefused: 'no_user'`. Productive refusing the lookup
+  (403): `actAsRefused: 'not_permitted'`. A malformed `actAs`: `invalid`.
+  Reads run as the token's owner. Never a fallback to the token's owner for a
+  change; the email is never audited. Every write tool's `upstream` starts
+  with `GET /people`.
+- Without `actAs`, `track_time` without `personId` is refused with our own
+  text instead of a schema error.
+
 ## 0.6.1
 
 - Licensor and copyright holder corrected to Borgels Services ApS in `LICENSE`,
