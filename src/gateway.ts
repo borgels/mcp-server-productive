@@ -16,6 +16,7 @@ import { DEFAULT_BASE_URL, ProductiveClient } from './productive/client.js';
 import type { ProductivePolicy } from './productive/policy.js';
 import {
   canonicalToolName,
+  currentActAs,
   currentCallContext,
   currentInstancePolicy,
   currentRedactor,
@@ -62,8 +63,10 @@ import { redactDeep, SecretRedactor } from './redaction.js';
  * No such person, or more than one: nothing is sent, and the result has
  * `actAsRefused: 'no_user'`. Productive refusing the lookup (403):
  * `actAsRefused: 'not_permitted'`. A malformed `actAs` refuses the call
- * (`invalid`). Reads run as the token's owner. The email is never written to
- * the audit or returned. The server's X-MCP-User resolution is never used.
+ * (`invalid`). Reads run as the token's owner, except the self tool
+ * `list_my_time_entries` (catalog `self: true`): it finds the person the same
+ * way, lists only their own time and is refused without `actAs`. The email is
+ * never written to the audit or returned. The server's X-MCP-User resolution is never used.
  *
  * Every call runs in a call scope of its own (AsyncLocalStorage), so a call
  * made from inside another instance's call (from its audit sink or its fetch)
@@ -153,6 +156,11 @@ export interface GatewayToolCatalogEntry {
    * broad tool only to roles that may read everything. No gateway tool is broad.
    */
   readonly broad: boolean;
+  /**
+   * True for a self tool: it works only on the Productive person of the person in `actAs` (found by email) and is
+   * refused without one (`actAsRefused: 'invalid'`). False for every other tool.
+   */
+  readonly self: boolean;
 }
 
 export interface ProductiveGatewayOptions {
@@ -226,6 +234,7 @@ export const productiveToolCatalog: readonly GatewayToolCatalogEntry[] = deepFre
     ...definition(tool),
     upstream: tool.upstream.map(operation => ({ ...operation })),
     broad: tool.broad === true,
+    self: tool.self === true,
   })),
 );
 
@@ -415,6 +424,11 @@ function buildProductiveGateway(options: ProductiveGatewayOptions, credentials: 
     if (tool.riskLevel !== 'read' && !policy.enableWrites) {
       await auditQuietly({ tool: name, action: 'policy_denied', reason: 'writes disabled' });
       return errorResult(`The tool ${tool.name} changes data, and writes are disabled on this instance.`);
+    }
+
+    if (tool.self === true && !currentActAs()) {
+      await auditQuietly({ tool: name, action: 'rejected', reason: 'no person to act as' });
+      return actAsRefused('invalid');
     }
 
     const parsed = tool.input.safeParse(input ?? {});

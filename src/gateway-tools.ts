@@ -1,6 +1,7 @@
 import { z } from 'zod/v4';
 import { MAX_PAGE_SIZE, type FilterValue, type ProductiveClient, type ProductiveResponse } from './productive/client.js';
 import { flattenCollection, flattenSingle, type FlatCollection, type FlatRecord } from './productive/jsonapi.js';
+import { ActAsRefusedError } from './act-as.js';
 import { personForChange } from './productive/act-as-person.js';
 import type { ProductivePolicy } from './productive/policy.js';
 import {
@@ -52,6 +53,11 @@ export interface GatewayToolSpec {
   summary: string;
   upstream: readonly GatewayUpstreamOperation[];
   broad?: boolean;
+  /**
+   * True for a self tool: it works only on the Productive person of the person in `actAs` (found by email) and is
+   * refused without one. False (absent) for every other tool.
+   */
+  self?: boolean;
   /** Registry resources the tool reads or writes; a write tool's must all be of the standard (`write`) tier. */
   resources: readonly string[];
   input: z.ZodObject;
@@ -356,6 +362,9 @@ const BUDGET_INCLUDE = ['company', 'project', 'responsible'];
 /** A track_time for someone else while acting as a person: refused before anything is written. */
 export const PERSON_MISMATCH =
   'Refused: acting as a person, time is logged only for that person; leave out personId. Nothing was changed.';
+
+/** list_my_time_entries got an entry of another person back (Productive ignored the filter): nothing is shown. */
+export const NOT_OWN_TIME = 'Refused: Productive returned time of another person; nothing is shown.';
 
 /** Productive's status filter values: 1 is active or open, 2 archived or closed; no filter when not asked. */
 const openOrClosed = (open: unknown): number | undefined => (open === true ? 1 : open === false ? 2 : undefined);
@@ -668,6 +677,46 @@ export const GATEWAY_TOOLS: readonly GatewayToolSpec[] = [
         page: input.page,
         pageSize: input.pageSize,
       });
+      return { ...page_(result), timeEntries: result.records.map(timeEntry) };
+    },
+  },
+  {
+    name: 'list_my_time_entries',
+    title: "List the person's own Productive time entries",
+    description:
+      "List the time entries of the person the host acts as (actAs), in a period of at most one year, optionally by project or task. Never anyone else's time. Time in minutes.",
+    riskLevel: 'read',
+    self: true,
+    summary: 'Productive time entries of the person.',
+    upstream: [findPerson, get('/time_entries')],
+    resources: ['time_entries'],
+    input: z.strictObject({
+      after: isoDate('First day of the period'),
+      before: isoDate('Last day of the period'),
+      projectId: id('project').optional(),
+      taskId: id('task').optional(),
+      page,
+      pageSize,
+    }),
+    async handler(input, context) {
+      checkPeriod(input as { after: string; before: string });
+      // The gateway refuses a self tool without a person before this runs; the check here keeps it so on its own.
+      const personId = await personForChange(context.client);
+      if (personId === undefined) throw new ActAsRefusedError('invalid');
+      const result = await list(context, 'time_entries', {
+        filters: {
+          after: input.after as string,
+          before: input.before as string,
+          person_id: personId,
+          project_id: input.projectId as string | undefined,
+          task_id: input.taskId as string | undefined,
+        },
+        include: ['person', 'service', 'task'],
+        page: input.page,
+        pageSize: input.pageSize,
+      });
+      // Only the person's own entries leave: an entry of anyone else (or of no one) means the filter was not applied.
+      if (result.records.some(record => relation(record, 'person')?.id !== personId)) throw new Error(NOT_OWN_TIME);
       return { ...page_(result), timeEntries: result.records.map(timeEntry) };
     },
   },

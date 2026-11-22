@@ -85,6 +85,7 @@ const SAMPLE_INPUT: Record<string, GatewayJsonObject> = {
   get_budget: { budgetId: '801' },
   list_services: { budgetId: '801' },
   list_time_entries: { after: '2026-11-01', before: '2026-11-30', personId: '11' },
+  list_my_time_entries: { after: '2026-11-01', before: '2026-11-30' },
   time_report: { after: '2026-01-01', before: '2026-12-31', groupBy: 'person' },
   create_task: { projectId: '701', title: 'Ny opgave' },
   update_task: { taskId: '9001', title: 'Nyt navn', dueDate: '2026-12-24' },
@@ -109,7 +110,7 @@ describe('tool catalog', () => {
     expect(() => {
       (productiveToolCatalog[0] as { name: string }).name = 'x';
     }).toThrow();
-    expect(productiveToolCatalog.map(({ upstream: _u, broad: _b, ...definition }) => definition)).toEqual(
+    expect(productiveToolCatalog.map(({ upstream: _u, broad: _b, self: _s, ...definition }) => definition)).toEqual(
       productiveGatewayTools,
     );
     expect(productiveToolCatalog.map(entry => entry.name)).toEqual(GATEWAY_TOOLS.map(tool => tool.name));
@@ -167,7 +168,9 @@ describe('tool catalog', () => {
     const instance = gateway(fake, { policy: { enableWrites: true } });
     for (const entry of productiveToolCatalog) {
       fake.requests.length = 0;
-      const result = await instance.callTool(entry.name, SAMPLE_INPUT[entry.name] ?? {});
+      // A self tool works only for a person (Bo, in the fake's people).
+      const context = entry.self ? { actAs: { email: 'bo@example.test' } } : undefined;
+      const result = await instance.callTool(entry.name, SAMPLE_INPUT[entry.name] ?? {}, context);
       expect(result.isError, `${entry.name}: ${result.content[0]?.text}`).toBeUndefined();
       for (const request of fake.requests) {
         expect(

@@ -312,7 +312,12 @@ The module exports:
   - A malformed `actAs` (`null` included): `actAsRefused: 'invalid'`, before
     anything is sent.
   - **Reads run as the token's owner**, with or without `actAs`: the host
-    decides who may read what.
+    decides who may read what. The one exception is the self tool
+    `list_my_time_entries` (the catalog marks it `self: true`): it finds the
+    person the same way and lists only their own time entries
+    (`filter[person_id]` set to their person, never from the input). Without
+    `actAs` it is refused (`actAsRefused: 'invalid'`) before anything is sent,
+    and an answer with an entry of anyone else is withheld whole.
   - The server adds the email to no audit record, text or field of its own
     (an audit error code is `act_as_<refusal>`). Productive's own data is
     passed on as it is.
@@ -357,6 +362,7 @@ The module exports:
 | `get_budget` | read | `budgetId` | `GET /deals/{budgetId}` |
 | `list_services` | read | `budgetId?`, `projectId?`, `page?`, `pageSize?` | `GET /services` |
 | `list_time_entries` | read | `after`, `before`, `personId?`, `projectId?`, `serviceId?`, `taskId?`, `page?`, `pageSize?` | `GET /time_entries` |
+| `list_my_time_entries` | read (self) | `after`, `before`, `projectId?`, `taskId?`, `page?`, `pageSize?` | `GET /people`, `GET /time_entries` |
 | `time_report` | read | `after`, `before`, `groupBy`, `projectId?`, `personId?`, `page?` | `GET /reports/time_reports` |
 | `create_task` | write | `projectId`, `taskListId?`, `title`, `description?`, `assigneeId?`, `dueDate?` | `GET /task_lists`, `POST /tasks` |
 | `update_task` | write | `taskId`, `title?`, `description?`, `assigneeId?`, `dueDate?`, `workflowStatusId?` | `PATCH /tasks/{taskId}` |
