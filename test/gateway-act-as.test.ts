@@ -128,6 +128,49 @@ describe('acting as a person (actAs)', () => {
     expect(audit.records.map(record => record.error).filter(Boolean)).toEqual(['act_as_no_user']);
   });
 
+  it.each([
+    ['a success', () => people([MIA])],
+    ['a 403 on the lookup', () => jsonApi({ errors: [{ detail: 'mia.lund@example.test' }] }, 403)],
+    ['a 500 on the lookup', () => jsonApi({ errors: [{ detail: 'mia.lund@example.test' }] }, 500)],
+    [
+      'a transport error',
+      () => {
+        throw new TypeError('fetch failed for mia.lund@example.test');
+      },
+    ],
+  ])('keeps the email out of the result and the audit after %s', async (_label, answer) => {
+    const audit = sink();
+    const fake = withPeople(answer);
+    const result = await writer(fake, audit).callTool('add_comment', { taskId: '9001', body: 'Hej' }, { caller: 'p1', actAs: PERSON });
+    expect(JSON.stringify(result)).not.toMatch(/mia/i);
+    expect(JSON.stringify(audit.records)).not.toMatch(/mia/i);
+  });
+
+  it('keeps two people apart when their calls run at the same time', async () => {
+    const BO = { id: '11', type: 'people', attributes: { first_name: 'Bo', last_name: 'Berg', email: 'bo@example.test', status: 1 } };
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => (release = resolve));
+    const fake = withPeople(async (request: RecordedRequest) => {
+      await gate;
+      return people(request.query.get('filter[email]') === 'bo@example.test' ? [BO] : [MIA]);
+    });
+    const instance = writer(fake);
+    const both = Promise.all([
+      instance.callTool('track_time', TRACK, { actAs: PERSON }),
+      instance.callTool('track_time', TRACK, { actAs: { email: 'bo@example.test' } }),
+    ]);
+    for (let i = 0; i < 100 && fake.requests.length < 2; i += 1) await new Promise(resolve => setImmediate(resolve));
+    release();
+    const results = await both;
+    for (const result of results) expect(result.isError).toBeUndefined();
+    const logged = fake.requests
+      .filter(request => request.method === 'POST')
+      .map(request => (request.body as { data: { attributes: { person_id: string } } }).data.attributes.person_id)
+      .sort();
+    expect(logged).toEqual(['11', '42']);
+    expect((results[0]!.structuredContent as { timeEntry: { id: string } }).timeEntry).toBeDefined();
+  });
+
   it('runs as before without actAs: personId is then required', async () => {
     const fake = fakeProductive();
     const result = await writer(fake).callTool('track_time', { ...TRACK, personId: '11' });

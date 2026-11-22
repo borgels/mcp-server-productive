@@ -297,8 +297,13 @@ The module exports:
     out; one that names anyone else is refused before anything is written
     (time is logged only for the person).
   - `create_task`, `update_task` and `add_comment` are made only when the
-    person exists. Productive has no author field to set, so its activity log
-    and a comment's creator still show the token's owner.
+    person exists. Productive's API has no writable author for them (a task's
+    and a comment's `creator` is read-only in its schema, and a token always
+    acts as its own user), so Productive's activity log and a comment's
+    creator show the token's owner, with or without `actAs`. This is not a
+    fallback: no other author can be sent. The host's own log names the
+    person, and the host's role for the person decides whether such a change
+    may be made at all.
   - No such person, an inactive one, more than one, or a result that may be
     cut short (a full page of 200, or a total above what was read): nothing
     is sent, and the result is an error with `actAsRefused: 'no_user'`.

@@ -724,7 +724,8 @@ export const GATEWAY_TOOLS: readonly GatewayToolSpec[] = [
       dueDate: isoDate('Due date').optional(),
     }),
     async handler(input, context) {
-      // With a person from the host: only when they are a person in Productive (no author field to set).
+      // With a person from the host: only when they are a person in Productive. A task's creator is read-only in
+      // Productive's API (no author can be sent), so Productive records the token's owner as for every call.
       await personForChange(context.client);
       let taskListId = input.taskListId as string | undefined;
       if (!taskListId) {
